@@ -86,6 +86,14 @@ class Node:
         for child in self.children:
             child.invalidate_cache()
     
+    def to_prefix(self) -> str:
+        """Returns the space-seperated prefix notation for the Rust compiler"""
+        if not self.children:
+            return str(self.value)
+        children_str = " ".join(child.to_prefix() for child in self.children)
+        return f"{self.value} {children_str}"
+
+
     
 
 
