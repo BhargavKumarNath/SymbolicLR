@@ -47,7 +47,6 @@ def mock_dataset():
     dataset.data = np.zeros((10000, 28, 28, 1))
     dataset.targets = np.tile(np.arange(10), 1000).tolist()
 
-    # Dummy transform just converts numpy to 4D tensor
     dataset.transform = lambda img: torch.tensor(img, dtype=torch.float32).permute(2, 0, 1)
     return dataset
 
