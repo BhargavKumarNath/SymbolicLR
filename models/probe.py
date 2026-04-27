@@ -35,10 +35,12 @@ def create_compiled_model(device: torch.device, in_channels: int = 1) -> nn.Modu
     Factory function to instantiate and fuse the model using PyTorch 2.0's compiler.
     Uses 'reduce-overhead' to minimize CPU overhead during small batched VRAM loading.
     """
+    import sys
     model = FastConvNet(in_channels=in_channels).to(device)
     
     # Attempt to compile the model to Triton kernels
-    if hasattr(torch, "compile"):
+    # torch.compile fails lazily during forward pass on Windows if MSVC/Triton is missing
+    if hasattr(torch, "compile") and sys.platform != "win32":
         try:
             model = torch.compile(model, mode="reduce-overhead", disable=False)
         except Exception:
@@ -73,7 +75,7 @@ class ProbeTrainer:
     ) -> float:
         optimizer = torch.optim.SGD(model.parameters(), lr=1e-3, momentum=0.9, weight_decay=1e-4)
         criterion = nn.CrossEntropyLoss()
-        scaler = torch.cuda.amp.GradScaler(enabled=self.amp_enabled)
+        scaler = torch.amp.GradScaler(enabled=self.amp_enabled)
         
         best_val_loss = float('inf')
         stagnant_epochs = 0

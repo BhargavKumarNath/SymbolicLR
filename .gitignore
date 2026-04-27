@@ -1,3 +1,4 @@
 .pytest_cache/
 .venv/
 rust_core/target/
+data_cache/

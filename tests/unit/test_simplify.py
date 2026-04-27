@@ -53,7 +53,7 @@ def test_simplification_fallback_on_error():
     
     pruned = simplify_tree(bad_tree)
     
-    # Instead of throwing a crash that stops a 4-hour evolution loop, it returns the original
+    # Instead of throwing a crash, it returns the original
     assert pruned.value == "unsupported_op"
 
 
@@ -63,6 +63,6 @@ def test_latex_generation():
     
     latex_str = tree_to_latex(tree)
     
-    assert "\\" in latex_str  # Checks for standard LaTeX syntax (e.g. \frac or \sin)
+    assert "\\" in latex_str  # Checks for standard LaTeX syntax
     assert "t" in latex_str
     
