@@ -1,7 +1,11 @@
 import argparse
 import random
 import time
-import torch
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
 import numpy as np
 from rich.console import Console
 from rich.table import Table

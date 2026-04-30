@@ -3,7 +3,15 @@ import numpy as np
 from typing import Dict, Tuple, List, Optional
 import copy
 from gp.tree import Node
-import symbolr_rust
+try:
+    import symbolr_rust
+except ImportError:
+    class MockSymbolrRust:
+        @staticmethod
+        def evaluate_fast(prefix, t_array):
+            # Return a simple linear decay as fallback for Mock Mode
+            return 0.1 * (1.0 - t_array)
+    symbolr_rust = MockSymbolrRust()
 
 class MAPElitesArchive:
     """

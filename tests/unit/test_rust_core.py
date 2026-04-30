@@ -1,7 +1,10 @@
 import pytest
 import numpy as np
 from gp.tree import Node
-import symbolr_rust
+try:
+    import symbolr_rust
+except ImportError:
+    symbolr_rust = None
 
 def test_prefix_conversion():
     """Validates that ASTs accurately serialize into space-separated prefix strings."""
@@ -21,7 +24,7 @@ def test_rust_vs_python_parity():
     Validates that the highly-optimized Rust extension returns EXACTLY the same 
     protected numerical results as the Python NumPy implementations.
     """
-    # Extremely aggressive formula testing all protected bounds
+    # Aggressive formula testing all protected bounds
     # log(abs(t)) / sqrt(-0.5) + exp(1000.0 * t)
     tree = Node("+", [
         Node("/", [
