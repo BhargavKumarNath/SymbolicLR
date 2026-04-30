@@ -9,8 +9,11 @@ except ImportError:
     class MockSymbolrRust:
         @staticmethod
         def evaluate_fast(prefix, t_array):
-            # Return a simple linear decay as fallback for Mock Mode
-            return 0.1 * (1.0 - t_array)
+            # Return a strictly positive decay as fallback for Mock Mode
+            # Formula: 0.01 * (1.0 + 0.5 * sin(len(prefix)) - 0.2 * t_array)
+            # This gives some variety based on formula length
+            var = 0.5 * np.sin(len(prefix))
+            return 0.01 * (1.0 + var - 0.2 * t_array)
     symbolr_rust = MockSymbolrRust()
 
 class MAPElitesArchive:

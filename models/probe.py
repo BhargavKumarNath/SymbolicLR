@@ -92,7 +92,7 @@ class ProbeTrainer:
         if not TORCH_AVAILABLE:
             # Mock evaluation logic: 
             # 1. Penalize non-finite schedules
-            if not np.all(np.isfinite(lr_schedule)) or np.any(lr_schedule <= 0) or np.any(lr_schedule > 10):
+            if not np.all(np.isfinite(lr_schedule)) or np.any(lr_schedule < 1e-7) or np.any(lr_schedule > 10):
                 return float('inf')
             
             # 2. Simulate loss: 

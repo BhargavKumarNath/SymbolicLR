@@ -36,8 +36,9 @@ except ImportError:
     class MockSymbolrRust:
         @staticmethod
         def evaluate_fast(prefix, t_array):
-            # Return a simple linear decay as fallback
-            return 0.1 * (1.0 - t_array)
+            # Return a strictly positive decay as fallback for Mock Mode
+            var = 0.5 * np.sin(len(prefix))
+            return 0.01 * (1.0 + var - 0.2 * t_array)
     symbolr_rust = MockSymbolrRust()
 
 
