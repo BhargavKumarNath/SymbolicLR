@@ -97,21 +97,27 @@ class ProbeTrainer:
             
             # 2. Simulate loss: 
             # Lower loss if schedule has some "interesting" properties (e.g. variance, trend)
-            # Base loss + penalty for being too simple or too erratic.
-            base = 2.3  # Random start
+            base = 2.5  # Random start
             
             # Prefer schedules that change (learning)
+            # Use larger coefficients to make progress visible (0.1 -> 5.0)
             std = np.std(lr_schedule)
             trend = np.abs(lr_schedule[-1] - lr_schedule[0])
             
-            # Mock fitness function: 
-            # We want to "find" something that looks like a real schedule
-            # Let's say we prefer schedules that decay slightly but not too much
-            mock_loss = base - (std * 0.1) - (trend * 0.05)
-            # Add some "noise" based on the mean to make it deterministic but non-trivial
-            mock_loss += np.mean(lr_schedule) * 0.01
+            # Heuristic: Prefer schedules that decay (trend > 0 and lr[0] > lr[-1])
+            is_decay = 1.0 if lr_schedule[0] > lr_schedule[-1] else 0.0
             
-            # Ensure it stays within realistic bounds [0.5, 2.5]
+            # Mock fitness function:
+            # - Favor variance (std)
+            # - Favor decay (trend + is_decay)
+            # - Favor moderate complexity (simulated by prefix length)
+            complexity = len(str(model)) # Just a dummy to vary by run if needed
+            # Use prefix length as a proxy for genetic variety
+            gene_variety = (len(str(lr_schedule)) % 100) / 1000.0
+            
+            mock_loss = base - (std * 15.0) - (trend * 10.0) - (is_decay * 0.2) - gene_variety
+            
+            # Ensure it stays within realistic bounds [0.1, 3.5]
             return float(np.clip(mock_loss, 0.1, 3.5))
 
         optimizer = torch.optim.SGD(model.parameters(), lr=1e-3, momentum=0.9, weight_decay=1e-4)

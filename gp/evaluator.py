@@ -10,8 +10,9 @@ except ImportError:
         @staticmethod
         def evaluate_fast(prefix, t_array):
             # Return a strictly positive decay as fallback for Mock Mode
-            var = 0.5 * np.sin(len(prefix))
-            return 0.01 * (1.0 + var - 0.2 * t_array)
+            base_lr = 0.01 + (len(prefix) % 50) / 100.0
+            decay_power = 1.0 + (ord(prefix[0]) % 5) if prefix else 1.0
+            return base_lr * (1.0 - 0.9 * (t_array ** decay_power))
     symbolr_rust = MockSymbolrRust()
 
 class ParallelEvaluator:
