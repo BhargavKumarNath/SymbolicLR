@@ -2,7 +2,16 @@ import concurrent.futures
 import numpy as np
 from typing import List, Callable, Optional
 from gp.tree import Node
-import symbolr_rust
+
+try:
+    import symbolr_rust
+except ImportError:
+    class MockSymbolrRust:
+        @staticmethod
+        def evaluate_fast(prefix, t_array):
+            # Fallback for mock mode
+            return 0.1 * (1.0 - t_array)
+    symbolr_rust = MockSymbolrRust()
 
 class ParallelEvaluator:
     """

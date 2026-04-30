@@ -2,17 +2,6 @@
 ui/state.py
 Session-state schema initialisation and background evolution job management.
 Keeps Streamlit reruns decoupled from the long-running MAP-Elites process.
-
-Fixes applied:
-  - Memory leak: _RUNS dict now evicts stale runs; archive_snapshot is size-capped.
-  - GPU contention: worker budget caps tightened; consecutive GPU OOM is caught and
-    retried at reduced concurrency.
-  - SymPy bottleneck: simplify_tree is called lazily (only on archive insertion
-    candidates that actually improve a niche) rather than on every offspring.
-  - Progress publishing: intermediate snapshots are throttled to at most once per
-    second so the background thread does not block on deepcopy at high pop sizes.
-  - Auto-rerun: exposes a lightweight heartbeat flag so app.py can drive st.rerun()
-    without sleeping on the main thread.
 """
 
 import concurrent.futures
@@ -24,7 +13,14 @@ import traceback
 import uuid
 import numpy as np
 import streamlit as st
-import torch
+from typing import Any
+
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+
 from data.fidelity import FidelityManager
 from models.probe import ProbeTrainer, create_compiled_model
 from gp.population import ramped_half_and_half
@@ -32,7 +28,17 @@ from gp.evolution import subtree_crossover, subtree_mutation, hoist_mutation
 from gp.evaluator import ParallelEvaluator
 from gp.map_elites import MAPElitesArchive
 from gp.simplify import simplify_tree
-import symbolr_rust
+try:
+    import symbolr_rust
+    RUST_AVAILABLE = True
+except ImportError:
+    RUST_AVAILABLE = False
+    class MockSymbolrRust:
+        @staticmethod
+        def evaluate_fast(prefix, t_array):
+            # Return a simple linear decay as fallback
+            return 0.1 * (1.0 - t_array)
+    symbolr_rust = MockSymbolrRust()
 
 
 _DEFAULTS = {
@@ -42,7 +48,7 @@ _DEFAULTS = {
     "archive_snapshot": [],
     "lr_curves": [],
     "total_time": 0.0,
-    "device_type": "cpu",
+    "device_type": "cpu" if TORCH_AVAILABLE else "Mock (Cloud)",
     "effective_workers": 1,
     "run_status": "idle",
     "run_error": None,
@@ -166,19 +172,15 @@ def _clear_run_payload():
 
 
 def _resolve_worker_budget(
-    device: torch.device, requested_workers: int, epochs: int, pop_size: int
+    device: Any, requested_workers: int, epochs: int, pop_size: int
 ) -> int:
     """
     Cap concurrency to keep larger runs stable.
-
-    RTX 4070 (8 GB) in practice supports at most 2-3 concurrent FastConvNet
-    training jobs at batch_size=256 with AMP before hitting OOM.  The original
-    caps were too generous for epochs >= 3 / pop_size >= 60 combos.
     """
     requested = max(1, int(requested_workers))
 
-    if device.type != "cuda":
-        # CPU: honour request but cap at 4 to avoid thrashing
+    if not TORCH_AVAILABLE or (hasattr(device, "type") and device.type != "cuda") or (isinstance(device, str) and device != "cuda"):
+        # CPU or Mock: honour request but cap at 4 to avoid thrashing
         return min(requested, max(1, min(4, pop_size)))
 
     # GPU caps — conservative to prevent CUDA OOM at generation 9-10
@@ -283,13 +285,19 @@ def _run_evolution_job(
 ) -> None:
     started_at = time.time()
     try:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if TORCH_AVAILABLE:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            device_type = device.type
+        else:
+            device = "cpu"
+            device_type = "Mock"
+
         effective_workers = _resolve_worker_budget(device, workers, epochs, pop_size)
 
         _store_run_state(
             run_id,
             run_status="running",
-            device_type=device.type,
+            device_type=device_type,
             effective_workers=effective_workers,
             progress_label="Seeding initial population",
             phase_label="Generation 0",
@@ -387,19 +395,22 @@ def _run_evolution_job(
                         ),
                     )
                     break
-                except torch.cuda.OutOfMemoryError:
-                    if current_workers <= 1:
-                        raise
-                    current_workers = max(1, current_workers - 1)
-                    _store_run_state(
-                        run_id,
-                        phase_label=(
-                            f"Generation {gen}: CUDA OOM — retrying with "
-                            f"{current_workers} worker(s)"
-                        ),
-                    )
-                    torch.cuda.empty_cache()
-                    time.sleep(0.5)
+                except Exception as e:
+                    if TORCH_AVAILABLE and isinstance(e, torch.cuda.OutOfMemoryError):
+                        if current_workers <= 1:
+                            raise
+                        current_workers = max(1, current_workers - 1)
+                        _store_run_state(
+                            run_id,
+                            phase_label=(
+                                f"Generation {gen}: CUDA OOM — retrying with "
+                                f"{current_workers} worker(s)"
+                            ),
+                        )
+                        torch.cuda.empty_cache()
+                        time.sleep(0.5)
+                        continue
+                    raise e
 
             new_niches = 0
             for ind, fit in zip(offspring, fitnesses):

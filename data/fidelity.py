@@ -1,14 +1,19 @@
-import torch
+try:
+    import torch
+    from torchvision import datasets, transforms
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+
 import numpy as np
-from typing import Tuple, Iterator
-from torchvision import datasets, transforms
+from typing import Tuple, Iterator, Any
 from sklearn.model_selection import train_test_split
 
 class VRAMDataLoader:
     """
     A custom fast DataLoader that iterates over tensors already pinned in GPU VRAM. Btpasses the CPU to GPU PCIe transfer bottleneck entirely
     """
-    def __init__(self, x_tensor: torch.Tensor, y_tensor: torch.Tensor, batch_size: int, shuffle: bool = True, drop_last: bool = True):
+    def __init__(self, x_tensor: Any, y_tensor: Any, batch_size: int, shuffle: bool = True, drop_last: bool = True):
         self.x = x_tensor
         self.y = y_tensor
         self.batch_size = batch_size
@@ -16,7 +21,12 @@ class VRAMDataLoader:
         self.drop_last = drop_last
         self.n_samples = len(self.x)
     
-    def __iter__(self) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
+    def __iter__(self) -> Iterator[Tuple[Any, Any]]:
+        if not TORCH_AVAILABLE:
+            for i in range(0, self.n_samples, self.batch_size):
+                yield None, None
+            return
+
         if self.shuffle:
             indices = torch.randperm(self.n_samples, device=self.x.device)
         else:
@@ -49,13 +59,19 @@ class FidelityManager:
 
     def _prepare_vram_split(
         self,
-        dataset: torch.utils.data.Dataset,
-        device: torch.device,
+        dataset: Any,
+        device: Any,
         fraction: float,
         val_split: float,
         batch_size: int
     ) -> Tuple[VRAMDataLoader, VRAMDataLoader]:
         """Core logic to stratify, tensorize, and push data to VRAM."""
+        if not TORCH_AVAILABLE:
+            # Return dummy loaders for mock mode
+            mock_x = np.zeros((10, 1))
+            mock_y = np.zeros(10)
+            return VRAMDataLoader(mock_x, mock_y, batch_size), VRAMDataLoader(mock_x, mock_y, batch_size)
+
         # 1. Extract raw data and targets efficiently
         if hasattr(dataset, 'data') and hasattr(dataset, 'targets'):
             # Works for MNIST and CIFAR10
@@ -101,8 +117,11 @@ class FidelityManager:
 
         return train_loader, val_loader
 
-    def get_low_fidelity(self, device: torch.device, batch_size: int = 256) -> Tuple[VRAMDataLoader, VRAMDataLoader]:
+    def get_low_fidelity(self, device: Any, batch_size: int = 256) -> Tuple[VRAMDataLoader, VRAMDataLoader]:
         """Low Fidelity: 5% of MNIST for rapid Sanity Checks."""
+        if not TORCH_AVAILABLE:
+             return self._prepare_vram_split(None, None, 0.05, 0.2, batch_size)
+
         transform = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize((0.1307,), (0.3081,))
@@ -114,8 +133,11 @@ class FidelityManager:
             
         return self._prepare_vram_split(dataset, device, fraction=0.05, val_split=0.2, batch_size=batch_size)
 
-    def get_medium_fidelity(self, device: torch.device, batch_size: int = 256) -> Tuple[VRAMDataLoader, VRAMDataLoader]:
+    def get_medium_fidelity(self, device: Any, batch_size: int = 256) -> Tuple[VRAMDataLoader, VRAMDataLoader]:
         """Medium Fidelity: 20% of CIFAR-10 for Refinement."""
+        if not TORCH_AVAILABLE:
+             return self._prepare_vram_split(None, None, 0.20, 0.2, batch_size)
+
         transform = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616))
@@ -123,8 +145,11 @@ class FidelityManager:
         dataset = datasets.CIFAR10(root=self.data_dir, train=True, download=True, transform=transform)
         return self._prepare_vram_split(dataset, device, fraction=0.20, val_split=0.2, batch_size=batch_size)
 
-    def get_high_fidelity(self, device: torch.device, batch_size: int = 256) -> Tuple[VRAMDataLoader, VRAMDataLoader]:
+    def get_high_fidelity(self, device: Any, batch_size: int = 256) -> Tuple[VRAMDataLoader, VRAMDataLoader]:
         """High Fidelity: 100% of CIFAR-10 for final Elite Evaluation."""
+        if not TORCH_AVAILABLE:
+             return self._prepare_vram_split(None, None, 1.0, 0.2, batch_size)
+
         transform = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616))

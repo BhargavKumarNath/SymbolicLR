@@ -1,9 +1,14 @@
+try:
+    import torch
+    from torch.utils.data import DataLoader, Subset
+    from torchvision import datasets, transforms
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+
 import random
-from typing import Tuple
+from typing import Tuple, Any
 import numpy as np
-import torch
-from torch.utils.data import DataLoader, Subset
-from torchvision import datasets, transforms
 from sklearn.model_selection import train_test_split
 
 def set_seed(seed: int = 42) -> None:
@@ -14,9 +19,10 @@ def set_seed(seed: int = 42) -> None:
     """
     random.seed(seed)
     np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+    if TORCH_AVAILABLE:
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
 
 def get_tier1_dataloaders(
         data_dir: str = "./data_cache",

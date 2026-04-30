@@ -40,6 +40,11 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
+    from ui.state import TORCH_AVAILABLE
+    if not TORCH_AVAILABLE:
+        st.warning("⚠️ **Running in Mock Mode** (Streamlit Cloud). For the full CUDA-accelerated discovery experience, please run this project locally.")
+        st.info("💡 Evolution is simulated here using a heuristic fitness function to demonstrate the UI and genetic operators.")
+
     st.markdown('<div class="nav-section-label">Navigation</div>', unsafe_allow_html=True)
     page = st.radio(
         "nav",
