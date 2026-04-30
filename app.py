@@ -103,7 +103,9 @@ with st.sidebar:
             # When the run finishes, trigger a full-page rerun once so the
             # completed results render on the active page.
             status = st.session_state.get("run_status", "idle")
-            if status not in {"queued", "running"}:
+            done_triggered = st.session_state.get("_done_triggered", False)
+            if status in {"completed", "failed"} and not done_triggered:
+                st.session_state["_done_triggered"] = True
                 st.rerun()
 
         _live_progress()

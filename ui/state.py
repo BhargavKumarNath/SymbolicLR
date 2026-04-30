@@ -67,6 +67,7 @@ _DEFAULTS = {
     "eval_total": 0,
     "run_params": {},
     "_heartbeat": 0,
+    "_done_triggered": False,
 }
 
 _RUNS_LOCK = threading.Lock()
@@ -138,12 +139,10 @@ def _is_terminal(status: str) -> bool:
 def _sync_from_snapshot(snapshot: dict | None) -> None:
     if snapshot is None:
         return
-    for key, default in _DEFAULTS.items():
+    for key in _DEFAULTS:
         if key in snapshot:
-            value = snapshot[key]
-            st.session_state[key] = (
-                copy.deepcopy(value) if isinstance(value, (list, dict)) else value
-            )
+            # Redundant deepcopy removed — _get_run_state already provides a safe copy
+            st.session_state[key] = snapshot[key]
 
 
 def init_state():
@@ -173,6 +172,7 @@ def _clear_run_payload():
     st.session_state["eval_completed"] = 0
     st.session_state["eval_total"] = 0
     st.session_state["_heartbeat"] = 0
+    st.session_state["_done_triggered"] = False
 
 
 def _resolve_worker_budget(
