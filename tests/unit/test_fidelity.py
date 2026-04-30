@@ -73,4 +73,26 @@ def test_fidelity_manager_low_tier(mock_mnist_cls, mock_dataset):
     x_batch, y_batch = next(iter(train_loader))
     assert x_batch.device.type == "cpu"
     assert y_batch.device.type == "cpu"
+
+
+def test_prepare_vram_split_keeps_subset_images_and_labels_aligned():
+    """Regression test for subset sampling: transformed images must match subset labels."""
+    dataset = MagicMock()
+    dataset.targets = np.tile(np.arange(10), 20).tolist()
+    dataset.data = np.array(dataset.targets, dtype=np.float32).reshape(200, 1, 1, 1)
+    dataset.transform = lambda img: torch.tensor(img, dtype=torch.float32).permute(2, 0, 1)
+
+    manager = FidelityManager(seed=7)
+    train_loader, val_loader = manager._prepare_vram_split(
+        dataset=dataset,
+        device=torch.device("cpu"),
+        fraction=0.5,
+        val_split=0.2,
+        batch_size=8,
+    )
+
+    for loader in (train_loader, val_loader):
+        x_batch, y_batch = next(iter(loader))
+        encoded_values = x_batch[:, 0, 0, 0].to(torch.int64)
+        assert torch.equal(encoded_values, y_batch.to(torch.int64))
     

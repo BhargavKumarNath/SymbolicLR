@@ -16,6 +16,7 @@ class Node:
         self.value = value
         self.children = children if children is not None else []
         self._hash_cache: Optional[str] = None
+        self.fitness: Optional[float] = None
     
     def evaluate(self, t: np.ndarray) -> np.ndarray:
         """
@@ -83,6 +84,7 @@ class Node:
     
     def invalidate_cache(self):
         self._hash_cache = None
+        self.fitness = None
         for child in self.children:
             child.invalidate_cache()
     

@@ -1,4 +1,3 @@
-# symbolr/benchmark.py
 import argparse
 import random
 import time
@@ -7,6 +6,7 @@ import numpy as np
 from rich.console import Console
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn
+from gp.tree import Node
 
 # Optional W&B integration
 try:

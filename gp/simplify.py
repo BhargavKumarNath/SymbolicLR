@@ -104,6 +104,8 @@ def simplify_tree(tree: Node) -> Node:
     it logs and returns the original tree to prevent GP loop crashes.
     """
     original = copy.deepcopy(tree)
+    if original.size() > 50:
+        return original
     try:
         # Translate to mathematical engine
         sp_expr = _node_to_sympy(original)

@@ -18,9 +18,10 @@ def _clear_all_caches(node: Node) -> None:
         node.invalidate_cache()
     else:
         node._hash_cache = None
-        
-    for child in node.children:
-        _clear_all_caches(child)
+        if hasattr(node, 'fitness'):
+            node.fitness = None
+        for child in node.children:
+            _clear_all_caches(child)
 
 
 def tournament_selection(population: List[Node], fitnesses: List[float], k: int = 3) -> Node:
@@ -40,7 +41,7 @@ def tournament_selection(population: List[Node], fitnesses: List[float], k: int 
     return copy.deepcopy(population[best_idx])
 
 
-def subtree_crossover(parent1: Node, parent2: Node) -> Tuple[Node, Node]:
+def subtree_crossover(parent1: Node, parent2: Node, max_depth: int = 7) -> Tuple[Node, Node]:
     """
     Performs standard GP subtree crossover by swapping two random subtrees.
     
@@ -65,10 +66,12 @@ def subtree_crossover(parent1: Node, parent2: Node) -> Tuple[Node, Node]:
     _clear_all_caches(p1)
     _clear_all_caches(p2)
     
+    if p1.depth() > max_depth: p1 = copy.deepcopy(parent1)
+    if p2.depth() > max_depth: p2 = copy.deepcopy(parent2)
     return p1, p2
 
 
-def subtree_mutation(parent: Node, max_mutation_depth: int = 4) -> Node:
+def subtree_mutation(parent: Node, max_mutation_depth: int = 4, max_depth: int = 7) -> Node:
     """
     Replaces a randomly chosen node with a newly generated random subtree.
     """
@@ -82,6 +85,7 @@ def subtree_mutation(parent: Node, max_mutation_depth: int = 4) -> Node:
     n.children = new_tree.children
     
     _clear_all_caches(p)
+    if p.depth() > max_depth: return copy.deepcopy(parent)
     return p
 
 

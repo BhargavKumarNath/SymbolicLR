@@ -63,6 +63,27 @@ def test_parallel_population_evaluation(dummy_dependencies):
     # Verify the cache flag was appended correctly to all trees via ThreadPool
     assert all(hasattr(tree, "fitness") for tree in pop)
 
+
+def test_parallel_population_evaluation_reports_progress(dummy_dependencies):
+    """Progress callback should be invoked as candidates complete."""
+    trainer, train, val, factory = dummy_dependencies
+    trainer.evaluate_schedule.side_effect = [1.0, 2.0, 3.0]
+
+    evaluator = ParallelEvaluator(trainer, train, val, epochs=1, time_steps=10)
+    pop = [Node("t"), Node(0.5), Node("sin", [Node("t")])]
+    updates = []
+
+    fitnesses = evaluator.evaluate_population(
+        pop,
+        factory,
+        max_workers=8,
+        progress_callback=lambda completed, total: updates.append((completed, total)),
+    )
+
+    assert fitnesses == [1.0, 2.0, 3.0]
+    assert updates
+    assert updates[-1] == (3, 3)
+
 def test_evaluator_handles_rust_math_crash(dummy_dependencies):
     """Proves the thread pool won't die if Rust yields a mathematically invalid schedule."""
     trainer, train, val, factory = dummy_dependencies

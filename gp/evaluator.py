@@ -1,6 +1,6 @@
 import concurrent.futures
 import numpy as np
-from typing import List, Callable
+from typing import List, Callable, Optional
 from gp.tree import Node
 import symbolr_rust
 
@@ -44,14 +44,26 @@ class ParallelEvaluator:
         tree.fitness = loss
         return loss
 
-    def evaluate_population(self, population: List[Node], model_factory: Callable, max_workers: int = 4) -> List[float]:
+    def evaluate_population(
+        self,
+        population: List[Node],
+        model_factory: Callable,
+        max_workers: int = 4,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> List[float]:
         """
         Evaluates the entire generation concurrently. 
         max_workers=4 is heavily optimized for an 8GB RTX 4070 avoiding OOM issues.
         """
-        fitnesses =[float('inf')] * len(population)
+        total = len(population)
+        if total == 0:
+            return []
+
+        fitnesses = [float('inf')] * total
+        safe_workers = max(1, min(max_workers, total))
+        completed = 0
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=safe_workers) as executor:
             # Map futures to their original index to maintain population order
             future_to_idx = {
                 executor.submit(self.evaluate_individual, ind, model_factory): i
@@ -64,5 +76,9 @@ class ParallelEvaluator:
                     fitnesses[idx] = future.result()
                 except Exception:
                     fitnesses[idx] = float('inf')
+                finally:
+                    completed += 1
+                    if progress_callback is not None:
+                        progress_callback(completed, total)
                     
         return fitnesses

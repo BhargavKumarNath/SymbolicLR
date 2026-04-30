@@ -85,7 +85,9 @@ class FidelityManager:
 
         # 4. Apply transforms and push directly to VRAM
         def to_vram_tensor(indices: np.ndarray) -> Tuple[torch.Tensor, torch.Tensor]:
-            x_tensors =[dataset.transform(dataset.data[i]) for i in indices]
+            # Use the stratified subset tensors, not the original dataset backing store,
+            # or images and labels drift out of sync once fraction < 1.0.
+            x_tensors = [dataset.transform(raw_x[i]) for i in indices]
             # Stack creates a contiguous block of memory
             x_tensor = torch.stack(x_tensors).to(device, non_blocking=True)
             y_tensor = torch.tensor(raw_y[indices], dtype=torch.long, device=device)

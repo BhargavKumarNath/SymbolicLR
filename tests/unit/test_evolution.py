@@ -59,6 +59,8 @@ def test_subtree_crossover():
     # Offspring must be valid Node instances
     assert isinstance(off1, Node)
     assert isinstance(off2, Node)
+    assert off1.fitness is None
+    assert off2.fitness is None
 
 
 def test_hoist_mutation_bloat_control():
@@ -77,3 +79,17 @@ def test_hoist_mutation_bloat_control():
     # The new size MUST be strictly less than or equal to original size
     assert offspring.size() <= original_size, "Hoist mutation failed to compress or maintain bloat."
     assert isinstance(offspring, Node)
+    assert offspring.fitness is None
+
+
+def test_mutation_clears_inherited_fitness_cache():
+    """Mutated descendants must not retain stale cached fitness from archive parents."""
+    parent = Node("+", [Node("t"), Node(0.5)])
+    parent.fitness = 0.123
+    parent.children[0].fitness = 0.456
+    parent.children[1].fitness = 0.789
+
+    offspring = subtree_mutation(parent, max_mutation_depth=3)
+
+    assert offspring.fitness is None
+    assert all(node.fitness is None for node in [offspring, *offspring.children])
