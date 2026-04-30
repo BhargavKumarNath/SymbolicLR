@@ -7,6 +7,7 @@ Responsibilities:
   3. Sidebar - logo, navigation radio, parameter sliders, run controls, live stats
   4. Route to the correct page module
   5. Launch background evolution runs
+  6. Non-blocking live progress via st.fragment(run_every=...)
 """
 
 import streamlit as st
@@ -27,7 +28,7 @@ inject_theme()
 init_state()
 sync_state()
 
-
+# Sidebar
 with st.sidebar:
     st.markdown(
         """
@@ -56,9 +57,9 @@ with st.sidebar:
     with st.container():
         st.markdown('<div style="padding:0 10px;">', unsafe_allow_html=True)
         gen_count = st.slider("Generations", 1, 50, 5)
-        pop_size = st.slider("Population Size", 10, 200, 50)
-        epochs = st.slider("Epochs per Eval", 1, 5, 1)
-        workers = st.slider("Parallel Workers", 1, 8, 4)
+        pop_size  = st.slider("Population Size", 10, 200, 50)
+        epochs    = st.slider("Epochs per Eval", 1, 5, 1)
+        workers   = st.slider("Parallel Workers", 1, 8, 4)
         st.markdown("</div>", unsafe_allow_html=True)
 
     is_running = st.session_state.get("run_status") in {"queued", "running"}
@@ -67,24 +68,46 @@ with st.sidebar:
     st.markdown("</div>", unsafe_allow_html=True)
 
     if is_running:
-        st.markdown(
-            f"""
-            <div class="sidebar-stat">
-                <div class="ss-label">Run Status</div>
-                <div class="ss-value green">{st.session_state.get("progress_label", "Running")}</div>
-                <div style="font-family:var(--font-body);font-size:12px;color:var(--text-secondary);margin-top:4px;">
-                    {st.session_state.get("phase_label", "")}
+        # Live progress panel
+        @st.fragment(run_every=1.5)
+        def _live_progress():
+            sync_state()
+            ratio = float(st.session_state.get("progress_ratio", 0.0))
+            label = st.session_state.get("progress_label", "Running…")
+            phase = st.session_state.get("phase_label", "")
+            completed = st.session_state.get("eval_completed", 0)
+            total     = st.session_state.get("eval_total", 0)
+
+            st.progress(ratio)
+            st.markdown(
+                f"""
+                <div class="sidebar-stat">
+                    <div class="ss-label">Run Status</div>
+                    <div class="ss-value green">{label}</div>
+                    <div style="font-family:var(--font-body);font-size:12px;
+                                color:var(--text-secondary);margin-top:4px;">
+                        {phase}
+                    </div>
                 </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.button("Refresh Run Status")
+                """,
+                unsafe_allow_html=True,
+            )
+            if total > 0:
+                st.caption(f"Candidates: {completed} / {total}")
+
+            # When the run finishes, trigger a full-page rerun once so the
+            # completed results render on the active page.
+            status = st.session_state.get("run_status", "idle")
+            if status not in {"queued", "running"}:
+                st.rerun()
+
+        _live_progress()
+
     elif st.session_state.get("run_status") == "failed":
         st.error(st.session_state.get("run_error", "Evolution run failed."))
 
     if st.session_state.get("evolution_done"):
-        log = st.session_state["gen_log"]
+        log  = st.session_state["gen_log"]
         best = log[-1]["best_loss"] if log else 0.0
         niches = log[-1]["niches"] if log else 0
         st.markdown(
@@ -105,14 +128,14 @@ with st.sidebar:
             unsafe_allow_html=True,
         )
 
-
+# Run trigger
 if run_btn:
     started = start_evolution(gen_count, pop_size, epochs, workers)
     if not started:
         st.warning("An evolution run is already active for this session.")
     st.rerun()
 
-
+# Page routing
 if "Overview" in page:
     overview.render()
 elif "Methodology" in page:

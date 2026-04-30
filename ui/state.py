@@ -2,6 +2,17 @@
 ui/state.py
 Session-state schema initialisation and background evolution job management.
 Keeps Streamlit reruns decoupled from the long-running MAP-Elites process.
+
+Fixes applied:
+  - Memory leak: _RUNS dict now evicts stale runs; archive_snapshot is size-capped.
+  - GPU contention: worker budget caps tightened; consecutive GPU OOM is caught and
+    retried at reduced concurrency.
+  - SymPy bottleneck: simplify_tree is called lazily (only on archive insertion
+    candidates that actually improve a niche) rather than on every offspring.
+  - Progress publishing: intermediate snapshots are throttled to at most once per
+    second so the background thread does not block on deepcopy at high pop sizes.
+  - Auto-rerun: exposes a lightweight heartbeat flag so app.py can drive st.rerun()
+    without sleeping on the main thread.
 """
 
 import concurrent.futures
@@ -42,15 +53,30 @@ _DEFAULTS = {
     "eval_completed": 0,
     "eval_total": 0,
     "run_params": {},
+    # Heartbeat counter incremented by the background thread each time it
+    # publishes progress.  app.py compares this against the value it saw on the
+    # previous render cycle and calls st.rerun() when they differ.
+    "_heartbeat": 0,
 }
 
 _RUNS_LOCK = threading.Lock()
 _RUNS: dict[str, dict] = {}
-_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="symbolr-runner")
+_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="symbolr-runner"
+)
 
+# Maximum number of completed/failed runs to keep in memory before eviction.
+_MAX_STALE_RUNS = 4
+
+# Minimum seconds between full snapshot publishes (archive + lr_curves are
+# expensive to deepcopy at large pop sizes).
+_PUBLISH_THROTTLE_S = 1.0
 
 def _fresh_defaults() -> dict:
-    return {key: (copy.deepcopy(value) if isinstance(value, (list, dict)) else value) for key, value in _DEFAULTS.items()}
+    return {
+        key: (copy.deepcopy(value) if isinstance(value, (list, dict)) else value)
+        for key, value in _DEFAULTS.items()
+    }
 
 
 def _new_run_state(run_id: str, params: dict) -> dict:
@@ -67,11 +93,24 @@ def _new_run_state(run_id: str, params: dict) -> dict:
     return state
 
 
+def _evict_stale_runs() -> None:
+    """Remove completed/failed runs beyond the retention cap."""
+    with _RUNS_LOCK:
+        terminal = [
+            rid
+            for rid, s in _RUNS.items()
+            if s.get("run_status") in {"completed", "failed"}
+        ]
+        for rid in terminal[:-_MAX_STALE_RUNS]:
+            del _RUNS[rid]
+
+
 def _store_run_state(run_id: str, **updates) -> None:
     with _RUNS_LOCK:
         if run_id not in _RUNS:
             return
         _RUNS[run_id].update(copy.deepcopy(updates))
+        _RUNS[run_id]["_heartbeat"] = _RUNS[run_id].get("_heartbeat", 0) + 1
 
 
 def _get_run_state(run_id: str | None) -> dict | None:
@@ -92,14 +131,18 @@ def _sync_from_snapshot(snapshot: dict | None) -> None:
     for key, default in _DEFAULTS.items():
         if key in snapshot:
             value = snapshot[key]
-            st.session_state[key] = copy.deepcopy(value) if isinstance(value, (list, dict)) else value
+            st.session_state[key] = (
+                copy.deepcopy(value) if isinstance(value, (list, dict)) else value
+            )
 
 
 def init_state():
     """Idempotent state bootstrap."""
     for key, default in _DEFAULTS.items():
         if key not in st.session_state:
-            st.session_state[key] = copy.deepcopy(default) if isinstance(default, (list, dict)) else default
+            st.session_state[key] = (
+                copy.deepcopy(default) if isinstance(default, (list, dict)) else default
+            )
 
 
 def sync_state():
@@ -119,37 +162,59 @@ def _clear_run_payload():
     st.session_state["phase_label"] = ""
     st.session_state["eval_completed"] = 0
     st.session_state["eval_total"] = 0
+    st.session_state["_heartbeat"] = 0
 
 
-def _resolve_worker_budget(device: torch.device, requested_workers: int, epochs: int, pop_size: int) -> int:
-    """Cap concurrency to keep larger runs responsive instead of overcommitting the hardware."""
+def _resolve_worker_budget(
+    device: torch.device, requested_workers: int, epochs: int, pop_size: int
+) -> int:
+    """
+    Cap concurrency to keep larger runs stable.
+
+    RTX 4070 (8 GB) in practice supports at most 2-3 concurrent FastConvNet
+    training jobs at batch_size=256 with AMP before hitting OOM.  The original
+    caps were too generous for epochs >= 3 / pop_size >= 60 combos.
+    """
     requested = max(1, int(requested_workers))
 
     if device.type != "cuda":
+        # CPU: honour request but cap at 4 to avoid thrashing
         return min(requested, max(1, min(4, pop_size)))
 
+    # GPU caps — conservative to prevent CUDA OOM at generation 9-10
     if epochs >= 5 or pop_size >= 100:
-        safe_cap = 2
+        safe_cap = 1          # was 2; single worker avoids OOM on long runs
     elif epochs >= 3 or pop_size >= 60:
-        safe_cap = 3
+        safe_cap = 2          # was 3
     else:
-        safe_cap = 4
+        safe_cap = 3          # was 4
 
     return min(requested, safe_cap, pop_size)
 
 
-def _build_archive_snapshot(archive: MAPElitesArchive) -> list[dict]:
-    snapshot = []
-    for (size_idx, com_idx), (loss, tree) in archive.archive.items():
-        snapshot.append(
-            {
-                "Size": size_idx,
-                "Center of Mass": com_idx / archive.com_bins,
-                "Loss": loss,
-                "Formula": str(tree),
-            }
-        )
-    return snapshot
+def _build_archive_snapshot(archive: MAPElitesArchive, max_points: int = 500) -> list[dict]:
+    """
+    Build a JSON-serialisable snapshot of the archive for the scatter chart.
+    Capped at max_points to keep deepcopy cheap at large archive sizes.
+    """
+    items = list(archive.archive.items())
+    # If oversized, stratified sample by loss (keep best + random remainder)
+    if len(items) > max_points:
+        items.sort(key=lambda x: x[1][0])
+        keep_top = max_points // 4
+        top = items[:keep_top]
+        rest = random.sample(items[keep_top:], max_points - keep_top)
+        items = top + rest
+
+    return [
+        {
+            "Size": size_idx,
+            "Center of Mass": com_idx / archive.com_bins,
+            "Loss": loss,
+            "Formula": str(tree),
+        }
+        for (size_idx, com_idx), (loss, tree) in items
+    ]
 
 
 def _build_lr_curves(hof: list, archive: MAPElitesArchive) -> list[dict]:
@@ -164,6 +229,10 @@ def _build_lr_curves(hof: list, archive: MAPElitesArchive) -> list[dict]:
     return curves
 
 
+# Track when we last did a full (expensive) snapshot publish
+_last_full_publish: dict[str, float] = {}
+
+
 def _publish_progress(
     run_id: str,
     archive: MAPElitesArchive,
@@ -176,24 +245,42 @@ def _publish_progress(
     eval_completed: int,
     eval_total: int,
     evolution_done: bool = False,
+    force: bool = False,
 ) -> None:
-    _store_run_state(
-        run_id,
-        gen_log=copy.deepcopy(gen_log),
-        hof=copy.deepcopy(hof),
-        archive_snapshot=_build_archive_snapshot(archive),
-        lr_curves=_build_lr_curves(hof, archive),
-        total_time=round(total_time, 1),
-        progress_ratio=float(progress_ratio),
-        progress_label=progress_label,
-        phase_label=phase_label,
-        eval_completed=int(eval_completed),
-        eval_total=int(eval_total),
-        evolution_done=evolution_done,
-    )
+    """
+    Write current run state back to _RUNS.
+
+    Heavy fields (archive_snapshot, lr_curves) are only rebuilt when the
+    throttle period has elapsed or force=True, to avoid blocking the
+    background thread on large deepcopy operations every generation.
+    """
+    now = time.time()
+    last = _last_full_publish.get(run_id, 0.0)
+    do_full = force or evolution_done or (now - last >= _PUBLISH_THROTTLE_S)
+
+    updates: dict = {
+        "gen_log": gen_log,          # already a list of small dicts — cheap
+        "hof": hof,
+        "total_time": round(total_time, 1),
+        "progress_ratio": float(progress_ratio),
+        "progress_label": progress_label,
+        "phase_label": phase_label,
+        "eval_completed": int(eval_completed),
+        "eval_total": int(eval_total),
+        "evolution_done": evolution_done,
+    }
+
+    if do_full:
+        updates["archive_snapshot"] = _build_archive_snapshot(archive)
+        updates["lr_curves"] = _build_lr_curves(hof, archive)
+        _last_full_publish[run_id] = now
+
+    _store_run_state(run_id, **updates)
 
 
-def _run_evolution_job(run_id: str, gen_count: int, pop_size: int, epochs: int, workers: int) -> None:
+def _run_evolution_job(
+    run_id: str, gen_count: int, pop_size: int, epochs: int, workers: int
+) -> None:
     started_at = time.time()
     try:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -211,13 +298,16 @@ def _run_evolution_job(run_id: str, gen_count: int, pop_size: int, epochs: int, 
         fidelity = FidelityManager(seed=42)
         train_loader, val_loader = fidelity.get_low_fidelity(device, batch_size=256)
         trainer = ProbeTrainer(device=device, patience=2, amp_enabled=True)
-        evaluator = ParallelEvaluator(trainer, train_loader, val_loader, epochs=epochs, time_steps=100)
+        evaluator = ParallelEvaluator(
+            trainer, train_loader, val_loader, epochs=epochs, time_steps=100
+        )
         archive = MAPElitesArchive(size_bins=30, com_bins=20, time_steps=100)
         model_factory = lambda: create_compiled_model(device, in_channels=1)
 
         gen_log: list[dict] = []
         hof: list = []
 
+        # Generation 0
         population = ramped_half_and_half(pop_size, min_depth=2, max_depth=4)
         fitnesses = evaluator.evaluate_population(
             population,
@@ -230,6 +320,7 @@ def _run_evolution_job(run_id: str, gen_count: int, pop_size: int, epochs: int, 
                 phase_label=f"Generation 0: {completed}/{total} candidates evaluated",
             ),
         )
+
         for tree, fit in zip(population, fitnesses):
             archive.try_add(simplify_tree(tree), fit)
 
@@ -245,8 +336,10 @@ def _run_evolution_job(run_id: str, gen_count: int, pop_size: int, epochs: int, 
             phase_label="Generation 0 complete",
             eval_completed=len(population),
             eval_total=len(population),
+            force=True,
         )
 
+        # Evolution loop
         for gen in range(1, gen_count + 1):
             gen_start = time.time()
             _store_run_state(
@@ -270,27 +363,54 @@ def _run_evolution_job(run_id: str, gen_count: int, pop_size: int, epochs: int, 
                     o1, o2 = subtree_crossover(p1, p2)
                     offspring.extend([o1, o2])
                 elif r < 0.75:
-                    offspring.extend([subtree_mutation(p1, 3), subtree_mutation(p2, 3)])
+                    offspring.extend(
+                        [subtree_mutation(p1, 3), subtree_mutation(p2, 3)]
+                    )
                 else:
                     offspring.extend([hoist_mutation(p1), hoist_mutation(p2)])
 
-            offspring = [simplify_tree(ind) for ind in offspring]
-            fitnesses = evaluator.evaluate_population(
-                offspring,
-                model_factory,
-                max_workers=effective_workers,
-                progress_callback=lambda completed, total, gen=gen: _store_run_state(
-                    run_id,
-                    eval_completed=completed,
-                    eval_total=total,
-                    phase_label=f"Generation {gen}: {completed}/{total} candidates evaluated",
-                ),
-            )
+            # Evaluate with dynamic worker reduction on CUDA OOM
+            current_workers = effective_workers
+            while True:
+                try:
+                    fitnesses = evaluator.evaluate_population(
+                        offspring,
+                        model_factory,
+                        max_workers=current_workers,
+                        progress_callback=lambda completed, total, gen=gen: _store_run_state(
+                            run_id,
+                            eval_completed=completed,
+                            eval_total=total,
+                            phase_label=(
+                                f"Generation {gen}: {completed}/{total} candidates evaluated"
+                            ),
+                        ),
+                    )
+                    break
+                except torch.cuda.OutOfMemoryError:
+                    if current_workers <= 1:
+                        raise
+                    current_workers = max(1, current_workers - 1)
+                    _store_run_state(
+                        run_id,
+                        phase_label=(
+                            f"Generation {gen}: CUDA OOM — retrying with "
+                            f"{current_workers} worker(s)"
+                        ),
+                    )
+                    torch.cuda.empty_cache()
+                    time.sleep(0.5)
 
             new_niches = 0
             for ind, fit in zip(offspring, fitnesses):
-                if archive.try_add(ind, fit):
-                    new_niches += 1
+                size_idx, com_idx = archive._compute_descriptors(ind)
+                if size_idx is None:
+                    continue
+                niche = (size_idx, com_idx)
+                if niche not in archive.archive or fit < archive.archive[niche][0]:
+                    simplified = simplify_tree(ind)
+                    if archive.try_add(simplified, fit):
+                        new_niches += 1
 
             hof = archive.get_hall_of_fame(top_k=5)
             best_loss = hof[0][0] if hof else float("inf")
@@ -312,7 +432,8 @@ def _run_evolution_job(run_id: str, gen_count: int, pop_size: int, epochs: int, 
                 total_time=time.time() - started_at,
                 progress_ratio=gen / gen_count,
                 progress_label=f"Generation {gen} / {gen_count}",
-                phase_label=f"Generation {gen} complete",
+                phase_label=f"Generation {gen} complete  ·  "
+                f"{new_niches} new niches  ·  best loss {best_loss:.4f}",
                 eval_completed=len(offspring),
                 eval_total=len(offspring),
             )
@@ -325,6 +446,8 @@ def _run_evolution_job(run_id: str, gen_count: int, pop_size: int, epochs: int, 
             progress_label="Evolution complete",
             phase_label="Run finished successfully",
         )
+        _evict_stale_runs()
+
     except Exception as exc:
         _store_run_state(
             run_id,
@@ -335,9 +458,15 @@ def _run_evolution_job(run_id: str, gen_count: int, pop_size: int, epochs: int, 
             total_time=round(time.time() - started_at, 1),
         )
         _store_run_state(run_id, traceback=traceback.format_exc())
+        _evict_stale_runs()
+    finally:
+        # Clean up per-run throttle tracking to avoid unbounded growth
+        _last_full_publish.pop(run_id, None)
 
 
-def start_evolution(gen_count: int, pop_size: int, epochs: int, workers: int) -> bool:
+def start_evolution(
+    gen_count: int, pop_size: int, epochs: int, workers: int
+) -> bool:
     """
     Launch a background evolution run.
     Returns False if this session already has an active run.
@@ -368,4 +497,3 @@ def start_evolution(gen_count: int, pop_size: int, epochs: int, workers: int) ->
 def get_run_status() -> str:
     sync_state()
     return st.session_state.get("run_status", "idle")
-

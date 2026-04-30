@@ -181,5 +181,5 @@ def render():
                 "Non-negativity enforcement",
             ],
         })
-        st.dataframe(ops_df, use_container_width=True, hide_index=True)
+        st.dataframe(ops_df, width='stretch', hide_index=True)
 

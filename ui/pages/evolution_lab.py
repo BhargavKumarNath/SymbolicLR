@@ -79,14 +79,14 @@ def render():
         if st.session_state["archive_snapshot"]:
             st.altair_chart(
                 archive_chart(st.session_state["archive_snapshot"]),
-                use_container_width=True,
+                width='stretch',
             )
 
     with col_lr:
         if st.session_state["lr_curves"]:
             st.altair_chart(
                 lr_schedule_chart(st.session_state["lr_curves"]),
-                use_container_width=True,
+                width='stretch',
             )
 
     # Hall of Fame

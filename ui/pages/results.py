@@ -50,12 +50,12 @@ def render():
         with col_conv:
             st.altair_chart(
                 loss_convergence_chart(gen_log),
-                use_container_width=True,
+                width='stretch',
             )
         with col_niche:
             st.altair_chart(
                 niche_growth_chart(gen_log),
-                use_container_width=True,
+                width='stretch',
             )
     else:
         st.markdown(
@@ -70,7 +70,7 @@ def render():
         )
 
     section_header("Baseline Comparison", "Benchmark")
-    st.altair_chart(baseline_comparison_chart(), use_container_width=True)
+    st.altair_chart(baseline_comparison_chart(), width='stretch')
 
     worst = max(b["Val Loss"] for b in BASELINE_DATA)
     for row in BASELINE_DATA:
@@ -98,6 +98,6 @@ def render():
             )
         st.dataframe(
             pd.DataFrame(rows),
-            use_container_width=True,
+            width='stretch',
             hide_index=True,
         )
