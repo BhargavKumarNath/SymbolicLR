@@ -36,12 +36,15 @@ except ImportError:
     class MockSymbolrRust:
         @staticmethod
         def evaluate_fast(prefix, t_array):
-            # Return a strictly positive decay as fallback for Mock Mode
-            # Vary base LR by prefix length: 0.01 to 0.5
-            base_lr = 0.01 + (len(prefix) % 50) / 100.0
-            # Vary decay shape by first character of prefix
-            decay_power = 1.0 + (ord(prefix[0]) % 5) if prefix else 1.0
-            return base_lr * (1.0 - 0.9 * (t_array ** decay_power))
+            # Deterministic seed from prefix for variety
+            seed = sum(ord(c) for c in prefix) % 1000
+            rng = np.random.RandomState(seed)
+            # Mix of decay, sine, and noise
+            base_lr = 0.001 + (seed % 100) / 200.0
+            decay = 1.0 - 0.8 * (t_array ** (1.0 + (seed % 5)))
+            oscillation = 0.1 * np.sin(5 * t_array * (seed % 3 + 1))
+            noise = 0.01 * rng.randn(len(t_array))
+            return np.clip(base_lr * (decay + oscillation + noise), 1e-6, 1.0)
     symbolr_rust = MockSymbolrRust()
 
 
@@ -63,9 +66,6 @@ _DEFAULTS = {
     "eval_completed": 0,
     "eval_total": 0,
     "run_params": {},
-    # Heartbeat counter incremented by the background thread each time it
-    # publishes progress.  app.py compares this against the value it saw on the
-    # previous render cycle and calls st.rerun() when they differ.
     "_heartbeat": 0,
 }
 
@@ -183,9 +183,9 @@ def _resolve_worker_budget(
     """
     requested = max(1, int(requested_workers))
 
-    if not TORCH_AVAILABLE or (hasattr(device, "type") and device.type != "cuda") or (isinstance(device, str) and device != "cuda"):
-        # CPU or Mock: honour request but cap at 4 to avoid thrashing
-        return min(requested, max(1, min(4, pop_size)))
+    if not TORCH_AVAILABLE:
+        # Mock mode on Cloud: Force 1 worker to ensure stability and low memory footprint
+        return 1
 
     # GPU caps — conservative to prevent CUDA OOM at generation 9-10
     if epochs >= 5 or pop_size >= 100:

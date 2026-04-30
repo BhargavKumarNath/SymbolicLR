@@ -9,10 +9,15 @@ except ImportError:
     class MockSymbolrRust:
         @staticmethod
         def evaluate_fast(prefix, t_array):
-            # Return a strictly positive decay as fallback for Mock Mode
-            base_lr = 0.01 + (len(prefix) % 50) / 100.0
-            decay_power = 1.0 + (ord(prefix[0]) % 5) if prefix else 1.0
-            return base_lr * (1.0 - 0.9 * (t_array ** decay_power))
+            # Deterministic seed from prefix for variety
+            seed = sum(ord(c) for c in prefix) % 1000
+            rng = np.random.RandomState(seed)
+            # Mix of decay, sine, and noise
+            base_lr = 0.001 + (seed % 100) / 200.0
+            decay = 1.0 - 0.8 * (t_array ** (1.0 + (seed % 5)))
+            oscillation = 0.1 * np.sin(5 * t_array * (seed % 3 + 1))
+            noise = 0.01 * rng.randn(len(t_array))
+            return np.clip(base_lr * (decay + oscillation + noise), 1e-6, 1.0)
     symbolr_rust = MockSymbolrRust()
 
 class MAPElitesArchive:
