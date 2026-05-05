@@ -1,4 +1,36 @@
-.pytest_cache/
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
 .venv/
+venv/
+env/
+
+# Rust build artifacts
 rust_core/target/
+
+# Data cache (downloaded datasets)
 data_cache/
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# IDE
+.vscode/
+.idea/
+
+# Generated artifacts
+graphify-out/
+
+# Agent configs
+.agents/
+
+# Test artifacts
+.pytest_cache/
+htmlcov/
+.coverage

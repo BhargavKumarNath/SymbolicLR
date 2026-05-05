@@ -1,22 +1,25 @@
 """
-ui/charts.py
-Altair chart factories for SymboLR dashboard.
+ui/charts.py — Altair chart factories for SymboLR dashboard.
 Every function accepts plain Python data structures and returns an alt.Chart.
+
 """
 
 import altair as alt
+import numpy as np
 import pandas as pd
 from ui.theme import VEGA_CONFIG
 
 # Accent palette shared across charts
 _RANK_COLORS = ["#00e5a0", "#0ea5e9", "#f59e0b", "#f43f5e", "#a78bfa"]
+_BASELINE_COLOR = "#4a6080"
+_DISCOVERED_COLOR = "#00e5a0"
 
-# Archive
+
+# Archive scatter
 def archive_chart(snapshot: list) -> alt.Chart:
     """
     2D scatter of the MAP-Elites behavioral archive.
     X = Center of Mass (schedule timing), Y = Tree Complexity, Color = Val Loss.
-    snapshot: list of dicts with keys Size, Center of Mass, Loss, Formula.
     """
     df = pd.DataFrame(snapshot)
     return (
@@ -51,7 +54,7 @@ def archive_chart(snapshot: list) -> alt.Chart:
     )
 
 
-# LR Schedules
+# LR Schedule Lines
 def lr_schedule_chart(curves: list) -> alt.Chart:
     """
     Multi-line plot of discovered LR schedules.
@@ -76,17 +79,16 @@ def lr_schedule_chart(curves: list) -> alt.Chart:
     )
 
 
-# Convergence
+# Convergence Line
 def loss_convergence_chart(gen_log: list) -> alt.Chart:
     """
     Line + dot chart of best val loss per generation.
-    gen_log: list of dicts with keys gen, best_loss.
     """
     df = pd.DataFrame(gen_log)
     base = alt.Chart(df)
     line = base.mark_line(color="#00e5a0", strokeWidth=2).encode(
         x=alt.X("gen:Q", axis=alt.Axis(title="Generation")),
-        y=alt.Y("best_loss:Q", scale=alt.Scale(zero=False), axis=alt.Axis(title="Best Validation Loss")),
+        y=alt.Y("best_loss:Q", scale=alt.Scale(zero=False), axis=alt.Axis(title="Best Validation Loss", format=".4f")),
     )
     dots = base.mark_circle(color="#00e5a0", size=60, opacity=0.9).encode(
         x="gen:Q",
@@ -105,10 +107,7 @@ def loss_convergence_chart(gen_log: list) -> alt.Chart:
 
 # Niche Growth
 def niche_growth_chart(gen_log: list) -> alt.Chart:
-    """
-    Bar chart of total occupied niches per generation.
-    gen_log: list of dicts with keys gen, niches, new_niches.
-    """
+    """Bar chart of total occupied niches per generation."""
     df = pd.DataFrame(gen_log)
     return (
         alt.Chart(df)
@@ -132,23 +131,21 @@ def niche_growth_chart(gen_log: list) -> alt.Chart:
     )
 
 
-# Baseline Comparison
-BASELINE_DATA = [
-    {"Schedule": "CosineAnnealing", "Val Loss": 0.312, "Type": "Hand-crafted"},
-    {"Schedule": "StepDecay",       "Val Loss": 0.328, "Type": "Hand-crafted"},
-    {"Schedule": "WarmRestarts",    "Val Loss": 0.306, "Type": "Hand-crafted"},
-    {"Schedule": "LinearDecay",     "Val Loss": 0.341, "Type": "Hand-crafted"},
-    {"Schedule": "Constant LR",     "Val Loss": 0.389, "Type": "Hand-crafted"},
-    {"Schedule": "SymboLR Elite",   "Val Loss": 0.289, "Type": "Discovered"},
-]
-
-
-def baseline_comparison_chart() -> alt.Chart:
+# Baseline Comparison (REAL DATA)
+def baseline_comparison_chart(
+    comparison_data: list = None,
+    symbolr_loss: float = None,
+) -> alt.Chart:
     """
     Horizontal bar chart comparing SymboLR against hand-crafted baselines.
-    Uses illustrative pre-computed values; swap for real results post-run.
+    Uses REAL computed data from optimiser/compare.py.
     """
-    df = pd.DataFrame(BASELINE_DATA)
+    if comparison_data is None:
+        from optimiser.compare import get_comparison_data
+        comparison_data = get_comparison_data(symbolr_loss)
+
+    df = pd.DataFrame(comparison_data)
+
     return (
         alt.Chart(df)
         .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
@@ -156,22 +153,59 @@ def baseline_comparison_chart() -> alt.Chart:
             y=alt.Y("Schedule:N", sort="-x", axis=alt.Axis(title=None)),
             x=alt.X(
                 "Val Loss:Q",
-                scale=alt.Scale(domain=[0.25, 0.42]),
-                axis=alt.Axis(title="Validation Loss (lower is better)"),
+                axis=alt.Axis(title="Validation Loss (lower is better)", format=".4f"),
             ),
             color=alt.Color(
                 "Type:N",
                 scale=alt.Scale(
                     domain=["Hand-crafted", "Discovered"],
-                    range=["#4a6080", "#00e5a0"],
+                    range=[_BASELINE_COLOR, _DISCOVERED_COLOR],
                 ),
                 legend=alt.Legend(title="Method"),
             ),
-            tooltip=["Schedule:N", alt.Tooltip("Val Loss:Q", format=".3f")],
+            tooltip=["Schedule:N", alt.Tooltip("Val Loss:Q", format=".4f")],
         )
         .properties(
-            title="Performance vs. Hand-crafted Baselines  ·  MNIST probe task",
-            height=280,
+            title="Performance vs. Hand-crafted Baselines  ·  synthetic probe task",
+            height=300,
         )
+        .configure(**VEGA_CONFIG)
+    )
+
+
+# Baseline LR Curves Gallery
+def baseline_gallery_chart() -> alt.Chart:
+    """
+    Multi-line chart showing all baseline LR schedules overlaid.
+    Used in the Overview page to introduce the concept.
+    """
+    from optimiser.compare import get_baseline_curves
+
+    curves = get_baseline_curves()
+    t_array = np.linspace(0.0, 1.0, 100)
+
+    records = []
+    for name, lr_values in curves.items():
+        for t_val, lr_val in zip(t_array, lr_values):
+            records.append({"Time": float(t_val), "LR": float(lr_val), "Schedule": name})
+
+    df = pd.DataFrame(records)
+
+    palette = ["#f43f5e", "#0ea5e9", "#f59e0b", "#a78bfa", "#8899bb", "#00e5a0", "#ef4444"]
+
+    return (
+        alt.Chart(df)
+        .mark_line(strokeWidth=2, opacity=0.85)
+        .encode(
+            x=alt.X("Time:Q", axis=alt.Axis(title="Normalized Training Time t ∈ [0, 1]")),
+            y=alt.Y("LR:Q", axis=alt.Axis(title="Learning Rate η(t)")),
+            color=alt.Color(
+                "Schedule:N",
+                scale=alt.Scale(range=palette),
+                legend=alt.Legend(title="Schedule Type"),
+            ),
+            tooltip=["Schedule:N", "Time:Q", alt.Tooltip("LR:Q", format=".6f")],
+        )
+        .properties(title="Standard LR Schedules  ·  The baselines SymboLR evolves against", height=320)
         .configure(**VEGA_CONFIG)
     )

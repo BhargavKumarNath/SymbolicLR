@@ -1,15 +1,28 @@
 """
-ui/pages/overview.py
-Overview page — system purpose, pipeline diagram, and feature cards.
+ui/pages/overview.py — Page 1: The Problem & Our Approach.
+
+Narrative flow:
+  "Learning rate schedules matter → hand-crafting is limited → 
+   evolution can discover novel formulas → here's our system"
+
+Includes:
+  - Interactive baseline schedule gallery (real curves, not static)
+  - System pipeline diagram
+  - Core capabilities with engineering context
+  - Clear call-to-action to the Evolution Lab
 """
 
 import streamlit as st
 from ui.theme import page_header, section_header, info_card
+from ui.charts import baseline_gallery_chart
+from config.settings import get_config
 
 
 def render():
+    cfg = get_config()
+
     page_header(
-        eyebrow="Research System · v1.0",
+        eyebrow="Research System · Symbolic AutoML",
         title="Symbolic Learning Rate Discovery",
         subtitle=(
             "SymboLR evolves mathematical formulas for neural network training schedules "
@@ -18,7 +31,34 @@ def render():
         ),
     )
 
-    # Hero stat strip
+    # ── The Problem ──────────────────────────────────────────────────
+    section_header("Why Learning Rate Schedules Matter", "The Problem")
+
+    col_problem, col_viz = st.columns([2, 3])
+
+    with col_problem:
+        info_card(
+            "📉  The Core Challenge",
+            "The learning rate is the single most important hyperparameter in neural network "
+            "training. A poorly chosen schedule wastes compute, diverges, or stagnates. "
+            "Practitioners spend hours hand-tuning schedules like cosine annealing and step "
+            "decay — but these represent only a tiny fraction of all possible mathematical formulas.",
+            accent="rose",
+        )
+        info_card(
+            "🧬  Our Approach",
+            "Instead of hand-crafting, SymboLR uses <strong>Genetic Programming</strong> to search "
+            "the space of all mathematical expressions <code>η(t)</code> built from "
+            "<code>{+, -, ×, ÷, sin, cos, exp, log, √, |·|}</code> and the time variable "
+            "<code>t ∈ [0, 1]</code>. A <strong>MAP-Elites</strong> archive maintains diverse "
+            "elites across schedule timing and formula complexity.",
+            accent="green",
+        )
+
+    with col_viz:
+        st.altair_chart(baseline_gallery_chart(), width='stretch')
+
+    # ── Hero stat strip ──────────────────────────────────────────────
     st.markdown("""
     <div class="stat-row">
         <div class="stat-pill">
@@ -38,17 +78,13 @@ def render():
             <div class="sp-value" style="font-size:14px;color:var(--accent-blue);font-family:var(--font-mono);">FastConvNet</div>
         </div>
         <div class="stat-pill">
-            <div class="sp-label">Fidelity Tiers</div>
-            <div class="sp-value">3</div>
-        </div>
-        <div class="stat-pill">
-            <div class="sp-label">Eval Engine</div>
-            <div class="sp-value" style="font-size:14px;color:var(--accent-amber);font-family:var(--font-mono);">Rust + GPU</div>
+            <div class="sp-label">Runtime</div>
+            <div class="sp-value" style="font-size:14px;color:var(--accent-amber);font-family:var(--font-mono);">""" + ("GPU + Rust" if cfg.is_gpu else ("CPU" if cfg.torch_available else "Cloud (Sim)")) + """</div>
         </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # Pipeline diagram
+    # ── Pipeline diagram ─────────────────────────────────────────────
     section_header("System Pipeline", "Architecture")
     st.markdown("""
     <div class="pipeline">
@@ -60,7 +96,7 @@ def render():
         <div class="pipeline-step">
             <div class="step-icon">⚡</div>
             <div class="step-label">Evaluate</div>
-            <div class="step-name">Rust + GPU</div>
+            <div class="step-name">""" + ("Rust + GPU" if cfg.is_gpu else "Synthetic Sim") + """</div>
         </div>
         <div class="pipeline-step">
             <div class="step-icon">🗺️</div>
@@ -90,7 +126,7 @@ def render():
     </div>
     """, unsafe_allow_html=True)
 
-    # Feature cards
+    # ── Core Capabilities ────────────────────────────────────────────
     section_header("Core Capabilities", "Features")
     col1, col2 = st.columns(2)
 
@@ -103,10 +139,10 @@ def render():
             accent="green",
         )
         info_card(
-            "⚡  Rust-Accelerated Evaluation",
-            "Formula evaluation is compiled to native Rust via PyO3, bypassing Python overhead "
-            "entirely. The Rust core mirrors protected NumPy semantics (guarded ÷, log, √, exp) "
-            "and achieves near-C performance for AST traversal.",
+            "⚡  Multi-Backend Evaluation",
+            "Formula evaluation routes through Rust (PyO3) when available for production speed, "
+            "or falls back to NumPy-based evaluation for cloud deployment. The Python AST evaluator "
+            "uses identical protected operators, ensuring consistent behavior across backends.",
             accent="blue",
         )
 
@@ -126,14 +162,20 @@ def render():
             accent="rose",
         )
 
-    # Getting started callout
-    st.markdown("""
+    # ── Getting started callout ──────────────────────────────────────
+    mode_note = ""
+    if cfg.is_cloud:
+        mode_note = (
+            " <strong>Note:</strong> This cloud deployment uses a synthetic fitness simulation. "
+            "For real GPU-accelerated training, clone the repo and run locally."
+        )
+
+    st.markdown(f"""
     <div class="info-card" style="margin-top:24px;background:rgba(0,229,160,0.04);border-color:rgba(0,229,160,0.3);">
         <h4 style="color:var(--accent-green);">→  Getting Started</h4>
-        <p>Configure evolution parameters in the sidebar (generations, population size, evaluation epochs,
-        parallel workers), then click <strong>🚀 Start Evolution</strong>. Navigate to
-        <strong>Evolution Lab</strong> to watch the archive grow in real time, or review
-        <strong>Results &amp; Analysis</strong> after the run completes.</p>
+        <p>Read the <strong>Methodology</strong> page to understand the technical foundations, then
+        navigate to <strong>Evolution Lab</strong> to configure parameters and run your own
+        experiment. After evolution completes, <strong>Results & Analysis</strong> will show
+        real convergence curves and baseline comparisons.{mode_note}</p>
     </div>
     """, unsafe_allow_html=True)
-

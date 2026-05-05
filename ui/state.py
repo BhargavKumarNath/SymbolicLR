@@ -1,7 +1,11 @@
 """
-ui/state.py
-Session-state schema initialisation and background evolution job management.
-Keeps Streamlit reruns decoupled from the long-running MAP-Elites process.
+ui/state.py — Session-state management and background evolution job runner.
+
+Refactored to use:
+  - config.settings for centralized configuration
+  - gp.rust_bridge for unified schedule evaluation
+  - gp.fitness for synthetic/real fitness evaluation
+  - Proper device handling for CPU/GPU/Cloud modes
 """
 
 import concurrent.futures
@@ -13,41 +17,21 @@ import traceback
 import uuid
 import numpy as np
 import streamlit as st
-from typing import Any
+from typing import Any, Optional
 
-try:
-    import torch
-    TORCH_AVAILABLE = True
-except ImportError:
-    TORCH_AVAILABLE = False
-
-from data.fidelity import FidelityManager
-from models.probe import ProbeTrainer, create_compiled_model
+from config.settings import get_config, RuntimeMode
+from gp.rust_bridge import evaluate_schedule
 from gp.population import ramped_half_and_half
 from gp.evolution import subtree_crossover, subtree_mutation, hoist_mutation
 from gp.evaluator import ParallelEvaluator
 from gp.map_elites import MAPElitesArchive
 from gp.simplify import simplify_tree
-try:
-    import symbolr_rust
-    RUST_AVAILABLE = True
-except ImportError:
-    RUST_AVAILABLE = False
-    class MockSymbolrRust:
-        @staticmethod
-        def evaluate_fast(prefix, t_array):
-            # Deterministic seed from prefix for variety
-            seed = sum(ord(c) for c in prefix) % 1000
-            rng = np.random.RandomState(seed)
-            # Mix of decay, sine, and noise
-            base_lr = 0.001 + (seed % 100) / 200.0
-            decay = 1.0 - 0.8 * (t_array ** (1.0 + (seed % 5)))
-            oscillation = 0.1 * np.sin(5 * t_array * (seed % 3 + 1))
-            noise = 0.01 * rng.randn(len(t_array))
-            return np.clip(base_lr * (decay + oscillation + noise), 1e-6, 1.0)
-    symbolr_rust = MockSymbolrRust()
 
+# Re-export for backward compat
+cfg = get_config()
+TORCH_AVAILABLE = cfg.torch_available
 
+# Default session state schema
 _DEFAULTS = {
     "evolution_done": False,
     "gen_log": [],
@@ -55,7 +39,7 @@ _DEFAULTS = {
     "archive_snapshot": [],
     "lr_curves": [],
     "total_time": 0.0,
-    "device_type": "cpu" if TORCH_AVAILABLE else "Mock (Cloud)",
+    "device_type": "GPU" if cfg.is_gpu else ("CPU" if cfg.torch_available else "Cloud (Simulated)"),
     "effective_workers": 1,
     "run_status": "idle",
     "run_error": None,
@@ -76,12 +60,9 @@ _EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=1, thread_name_prefix="symbolr-runner"
 )
 
-# Maximum number of completed/failed runs to keep in memory before eviction.
-_MAX_STALE_RUNS = 4
+_MAX_STALE_RUNS = cfg.max_stale_runs
+_PUBLISH_THROTTLE_S = cfg.publish_throttle_s
 
-# Minimum seconds between full snapshot publishes (archive + lr_curves are
-# expensive to deepcopy at large pop sizes).
-_PUBLISH_THROTTLE_S = 1.0
 
 def _fresh_defaults() -> dict:
     return {
@@ -124,7 +105,7 @@ def _store_run_state(run_id: str, **updates) -> None:
         _RUNS[run_id]["_heartbeat"] = _RUNS[run_id].get("_heartbeat", 0) + 1
 
 
-def _get_run_state(run_id: str | None) -> dict | None:
+def _get_run_state(run_id: Optional[str]) -> Optional[dict]:
     if not run_id:
         return None
     with _RUNS_LOCK:
@@ -136,12 +117,11 @@ def _is_terminal(status: str) -> bool:
     return status in {"completed", "failed"}
 
 
-def _sync_from_snapshot(snapshot: dict | None) -> None:
+def _sync_from_snapshot(snapshot: Optional[dict]) -> None:
     if snapshot is None:
         return
     for key in _DEFAULTS:
         if key in snapshot:
-            # Redundant deepcopy removed — _get_run_state already provides a safe copy
             st.session_state[key] = snapshot[key]
 
 
@@ -175,36 +155,12 @@ def _clear_run_payload():
     st.session_state["_done_triggered"] = False
 
 
-def _resolve_worker_budget(
-    device: Any, requested_workers: int, epochs: int, pop_size: int
-) -> int:
-    """
-    Cap concurrency to keep larger runs stable.
-    """
-    requested = max(1, int(requested_workers))
-
-    if not TORCH_AVAILABLE:
-        # Mock mode on Cloud: Force 1 worker to ensure stability and low memory footprint
-        return 1
-
-    # GPU caps — conservative to prevent CUDA OOM at generation 9-10
-    if epochs >= 5 or pop_size >= 100:
-        safe_cap = 1          # was 2; single worker avoids OOM on long runs
-    elif epochs >= 3 or pop_size >= 60:
-        safe_cap = 2          # was 3
-    else:
-        safe_cap = 3          # was 4
-
-    return min(requested, safe_cap, pop_size)
-
-
 def _build_archive_snapshot(archive: MAPElitesArchive, max_points: int = 500) -> list[dict]:
     """
     Build a JSON-serialisable snapshot of the archive for the scatter chart.
     Capped at max_points to keep deepcopy cheap at large archive sizes.
     """
     items = list(archive.archive.items())
-    # If oversized, stratified sample by loss (keep best + random remainder)
     if len(items) > max_points:
         items.sort(key=lambda x: x[1][0])
         keep_top = max_points // 4
@@ -223,13 +179,18 @@ def _build_archive_snapshot(archive: MAPElitesArchive, max_points: int = 500) ->
     ]
 
 
-def _build_lr_curves(hof: list, archive: MAPElitesArchive) -> list[dict]:
+def _build_lr_curves(hof: list, t_array: np.ndarray) -> list[dict]:
+    """Build LR curve data for the top formulas."""
     curves = []
     for i, (loss, tree) in enumerate(hof):
         try:
-            lrs = symbolr_rust.evaluate_fast(tree.to_prefix(), archive.t_array)
-            for t_val, lr in zip(archive.t_array, lrs):
-                curves.append({"Time": t_val, "LR": lr, "Rank": f"#{i+1}  loss={loss:.3f}"})
+            lrs = evaluate_schedule(tree, t_array)
+            for t_val, lr in zip(t_array, lrs):
+                curves.append({
+                    "Time": float(t_val),
+                    "LR": float(lr),
+                    "Rank": f"#{i+1}  loss={loss:.3f}",
+                })
         except Exception:
             continue
     return curves
@@ -257,15 +218,14 @@ def _publish_progress(
     Write current run state back to _RUNS.
 
     Heavy fields (archive_snapshot, lr_curves) are only rebuilt when the
-    throttle period has elapsed or force=True, to avoid blocking the
-    background thread on large deepcopy operations every generation.
+    throttle period has elapsed or force=True.
     """
     now = time.time()
     last = _last_full_publish.get(run_id, 0.0)
     do_full = force or evolution_done or (now - last >= _PUBLISH_THROTTLE_S)
 
     updates: dict = {
-        "gen_log": gen_log,          # already a list of small dicts — cheap
+        "gen_log": gen_log,
         "hof": hof,
         "total_time": round(total_time, 1),
         "progress_ratio": float(progress_ratio),
@@ -278,25 +238,61 @@ def _publish_progress(
 
     if do_full:
         updates["archive_snapshot"] = _build_archive_snapshot(archive)
-        updates["lr_curves"] = _build_lr_curves(hof, archive)
+        updates["lr_curves"] = _build_lr_curves(hof, archive.t_array)
         _last_full_publish[run_id] = now
 
     _store_run_state(run_id, **updates)
 
 
+def _setup_evaluation_stack(epochs: int, workers: int):
+    """
+    Create trainer, loaders, evaluator, and model_factory
+    appropriate for the current runtime mode.
+
+    Real PyTorch training is only used when GPU is available.
+    On CPU (local or cloud), synthetic fitness is used for speed and stability.
+    """
+    cfg = get_config()
+    effective_workers = cfg.resolve_workers(workers, epochs, 50)
+
+    if cfg.is_gpu:
+        import torch
+        device = cfg.device
+        from data.fidelity import FidelityManager
+        from models.probe import ProbeTrainer, create_compiled_model
+
+        fidelity = FidelityManager(seed=cfg.seed)
+        train_loader, val_loader = fidelity.get_low_fidelity(device, batch_size=cfg.batch_size)
+        trainer = ProbeTrainer(device=device, patience=cfg.patience, amp_enabled=cfg.amp_enabled)
+        model_factory = lambda: create_compiled_model(device, in_channels=1)
+    else:
+        # CPU and Cloud modes use synthetic fitness — fast and meaningful
+        train_loader = None
+        val_loader = None
+        trainer = None
+        model_factory = None
+
+    evaluator = ParallelEvaluator(
+        trainer=trainer,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        epochs=epochs,
+        time_steps=cfg.time_steps,
+    )
+
+    return evaluator, model_factory, effective_workers
+
+
 def _run_evolution_job(
     run_id: str, gen_count: int, pop_size: int, epochs: int, workers: int
 ) -> None:
+    """Background evolution job. Runs in a separate thread."""
     started_at = time.time()
     try:
-        if TORCH_AVAILABLE:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            device_type = device.type
-        else:
-            device = "cpu"
-            device_type = "Mock"
+        cfg = get_config()
+        evaluator, model_factory, effective_workers = _setup_evaluation_stack(epochs, workers)
 
-        effective_workers = _resolve_worker_budget(device, workers, epochs, pop_size)
+        device_type = "GPU" if cfg.is_gpu else ("CPU" if cfg.torch_available else "Cloud (Simulated)")
 
         _store_run_state(
             run_id,
@@ -307,20 +303,17 @@ def _run_evolution_job(
             phase_label="Generation 0",
         )
 
-        fidelity = FidelityManager(seed=42)
-        train_loader, val_loader = fidelity.get_low_fidelity(device, batch_size=256)
-        trainer = ProbeTrainer(device=device, patience=2, amp_enabled=True)
-        evaluator = ParallelEvaluator(
-            trainer, train_loader, val_loader, epochs=epochs, time_steps=100
+        archive = MAPElitesArchive(
+            size_bins=cfg.size_bins,
+            com_bins=cfg.com_bins,
+            time_steps=cfg.time_steps,
         )
-        archive = MAPElitesArchive(size_bins=30, com_bins=20, time_steps=100)
-        model_factory = lambda: create_compiled_model(device, in_channels=1)
 
         gen_log: list[dict] = []
         hof: list = []
 
         # Generation 0
-        population = ramped_half_and_half(pop_size, min_depth=2, max_depth=4)
+        population = ramped_half_and_half(pop_size, min_depth=cfg.min_tree_depth, max_depth=cfg.max_tree_depth - 1)
         fitnesses = evaluator.evaluate_population(
             population,
             model_factory,
@@ -365,16 +358,16 @@ def _run_evolution_job(
 
             parents = archive.sample_parents(pop_size)
             if not parents:
-                parents = ramped_half_and_half(pop_size, min_depth=2, max_depth=4)
+                parents = ramped_half_and_half(pop_size, min_depth=cfg.min_tree_depth, max_depth=cfg.max_tree_depth - 1)
 
             offspring = []
             for _ in range(pop_size // 2):
                 p1, p2 = random.choice(parents), random.choice(parents)
                 r = random.random()
-                if r < 0.50:
+                if r < cfg.crossover_rate:
                     o1, o2 = subtree_crossover(p1, p2)
                     offspring.extend([o1, o2])
-                elif r < 0.75:
+                elif r < cfg.crossover_rate + cfg.mutation_rate:
                     offspring.extend(
                         [subtree_mutation(p1, 3), subtree_mutation(p2, 3)]
                     )
@@ -400,20 +393,22 @@ def _run_evolution_job(
                     )
                     break
                 except Exception as e:
-                    if TORCH_AVAILABLE and isinstance(e, torch.cuda.OutOfMemoryError):
-                        if current_workers <= 1:
-                            raise
-                        current_workers = max(1, current_workers - 1)
-                        _store_run_state(
-                            run_id,
-                            phase_label=(
-                                f"Generation {gen}: CUDA OOM — retrying with "
-                                f"{current_workers} worker(s)"
-                            ),
-                        )
-                        torch.cuda.empty_cache()
-                        time.sleep(0.5)
-                        continue
+                    if cfg.torch_available:
+                        import torch
+                        if isinstance(e, torch.cuda.OutOfMemoryError):
+                            if current_workers <= 1:
+                                raise
+                            current_workers = max(1, current_workers - 1)
+                            _store_run_state(
+                                run_id,
+                                phase_label=(
+                                    f"Generation {gen}: CUDA OOM — retrying with "
+                                    f"{current_workers} worker(s)"
+                                ),
+                            )
+                            torch.cuda.empty_cache()
+                            time.sleep(0.5)
+                            continue
                     raise e
 
             new_niches = 0
@@ -475,7 +470,6 @@ def _run_evolution_job(
         _store_run_state(run_id, traceback=traceback.format_exc())
         _evict_stale_runs()
     finally:
-        # Clean up per-run throttle tracking to avoid unbounded growth
         _last_full_publish.pop(run_id, None)
 
 

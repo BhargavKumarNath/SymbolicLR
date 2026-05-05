@@ -1,0 +1,28 @@
+# SymboLR — Full dependencies for local GPU execution
+# Install with: pip install -r requirements-gpu.txt
+
+# Core
+numpy>=1.24.0
+scikit-learn>=1.3.0
+scipy>=1.11.0
+sympy>=1.12
+streamlit>=1.28.0
+altair>=5.0.0
+pandas>=2.0.0
+
+# Deep Learning
+torch>=2.1.0
+torchvision>=0.16.0
+
+# Rust extension (build from source)
+maturin>=1.3.0
+
+# CLI & Logging
+rich>=13.0.0
+
+# Optional: experiment tracking
+# wandb>=0.15.0
+
+# Testing
+pytest>=7.4.0
+pytest-cov>=4.1.0

@@ -1,8 +1,9 @@
+# SymboLR — Cloud-safe dependencies (no PyTorch, no CUDA, no Rust compiler)
+# These are the ONLY dependencies needed for Streamlit Cloud deployment.
 numpy>=1.24.0
 scikit-learn>=1.3.0
 scipy>=1.11.0
 sympy>=1.12
 streamlit>=1.28.0
-pytest>=7.4.0
-pytest-cov>=4.1.0
-maturin>=1.3.0
+altair>=5.0.0
+pandas>=2.0.0

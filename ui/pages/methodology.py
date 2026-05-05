@@ -1,14 +1,18 @@
 """
-ui/pages/methodology.py
-Methodology page — GP theory, MAP-Elites, evaluation stack, operator table.
+ui/pages/methodology.py — Page 2: How SymboLR Works.
+
+Technical deep-dive with interactive elements that connect to real system state.
 """
 
 import pandas as pd
 import streamlit as st
 from ui.theme import page_header, section_header, info_card
+from config.settings import get_config
 
 
 def render():
+    cfg = get_config()
+
     page_header(
         eyebrow="Technical Deep-Dive",
         title="Methodology",
@@ -40,21 +44,21 @@ def render():
                 "🔀  Subtree Crossover",
                 "Selects one random subtree from each parent and swaps them, "
                 "combining structural features from both. "
-                "Probability: <span style='color:var(--accent-green);font-family:var(--font-mono);'>50%</span>",
+                f"Probability: <span style='color:var(--accent-green);font-family:var(--font-mono);'>{int(cfg.crossover_rate*100)}%</span>",
             )
         with c2:
             info_card(
                 "🌿  Subtree Mutation",
                 "Replaces a randomly chosen node with a freshly generated random subtree, "
                 "introducing structural novelty. "
-                "Probability: <span style='color:var(--accent-blue);font-family:var(--font-mono);'>25%</span>",
+                f"Probability: <span style='color:var(--accent-blue);font-family:var(--font-mono);'>{int(cfg.mutation_rate*100)}%</span>",
             )
         with c3:
             info_card(
                 "✂️  Hoist Mutation",
                 "Anti-bloat operator: replaces a subtree with one of its own descendants, "
                 "<em>guaranteeing</em> a strictly smaller offspring. "
-                "Probability: <span style='color:var(--accent-amber);font-family:var(--font-mono);'>25%</span>",
+                f"Probability: <span style='color:var(--accent-amber);font-family:var(--font-mono);'>{int(cfg.hoist_rate*100)}%</span>",
             )
 
         section_header("Initial Population: Ramped Half-and-Half")
@@ -83,7 +87,7 @@ def render():
         with col1:
             info_card(
                 "📐  Dimension 1: Tree Complexity",
-                "Measured as total AST node count. Binned into 30 buckets. "
+                f"Measured as total AST node count. Binned into {cfg.size_bins} buckets. "
                 "Ensures discovery of both ultra-compact formulas (e.g. <code>sin(t)</code>) "
                 "and complex multi-term schedules.",
             )
@@ -96,9 +100,9 @@ def render():
         with col2:
             info_card(
                 "📊  Dimension 2: Center of Mass",
-                "Computes <code>Σ(t · LR(t)) / Σ(LR(t))</code> over the schedule, "
-                "quantifying whether a formula concentrates learning early (warmup) "
-                "or late (cooldown). Binned into 20 buckets.",
+                f"Computes <code>Σ(t · LR(t)) / Σ(LR(t))</code> over the schedule, "
+                f"quantifying whether a formula concentrates learning early (warmup) "
+                f"or late (cooldown). Binned into {cfg.com_bins} buckets.",
             )
             info_card(
                 "🎲  Parent Selection",
@@ -107,9 +111,36 @@ def render():
                 "strongly protecting diversity across generations.",
             )
 
+        # Archive capacity indicator
+        max_niches = cfg.size_bins * cfg.com_bins
+        st.markdown(f"""
+        <div class="stat-row">
+            <div class="stat-pill">
+                <div class="sp-label">Max Archive Capacity</div>
+                <div class="sp-value">{max_niches}</div>
+            </div>
+            <div class="stat-pill">
+                <div class="sp-label">Complexity Bins</div>
+                <div class="sp-value">{cfg.size_bins}</div>
+            </div>
+            <div class="stat-pill">
+                <div class="sp-label">Timing Bins</div>
+                <div class="sp-value">{cfg.com_bins}</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
     # Tab 3: Evaluation Stack
     with tab_eval:
         section_header("Multi-Fidelity Evaluation Stack")
+
+        if cfg.is_cloud:
+            st.info(
+                "☁️ **Cloud Mode Active** — Using synthetic fitness simulation (gradient descent on a "
+                "quadratic loss landscape). This produces realistic convergence dynamics without "
+                "requiring PyTorch or GPU hardware."
+            )
+
         c1, c2, c3 = st.columns(3)
         with c1:
             info_card(
@@ -136,14 +167,25 @@ def render():
                 accent="rose",
             )
 
+        if cfg.is_cloud:
+            section_header("Synthetic Fitness Model", "Cloud Mode")
+            info_card(
+                "🧮  Quadratic Loss Landscape Simulation",
+                "In cloud mode, each candidate schedule is evaluated by simulating SGD on a "
+                "5-dimensional quadratic loss surface with heterogeneous curvature "
+                "<code>[0.5, 1.0, 2.0, 4.0, 8.0]</code>. The simulation includes stochastic "
+                "gradient noise, mini-batch variance, and convergence/divergence detection. "
+                "This produces realistic fitness signals that meaningfully differentiate "
+                "between schedule quality — good schedules converge, bad ones diverge.",
+                accent="blue",
+            )
+
         info_card(
             "🔄  Concurrent Evaluation Architecture",
             "A <code>ThreadPoolExecutor</code> (1–8 configurable workers) evaluates the population "
-            "concurrently. Each worker executes: (1) Rust prefix-expression parsing → "
-            "(2) element-wise schedule evaluation → (3) <code>FastConvNet</code> training on GPU. "
-            "With VRAM-resident data, GPU utilization stays high while the ThreadPool overlaps "
-            "Rust CPU work with GPU kernel launches. A fitness cache prevents re-evaluating "
-            "identical ASTs across generations.",
+            "concurrently. Each worker executes: (1) Schedule evaluation (Rust or Python) → "
+            "(2) Fitness computation (real training or synthetic simulation). "
+            "A fitness cache prevents re-evaluating identical ASTs across generations.",
         )
 
     # Tab 4: Operators
@@ -182,4 +224,3 @@ def render():
             ],
         })
         st.dataframe(ops_df, width='stretch', hide_index=True)
-
