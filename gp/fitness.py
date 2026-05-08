@@ -1,16 +1,10 @@
 """
-gp/fitness.py — Unified fitness evaluation for SymboLR.
+gp/fitness.py - Unified fitness evaluation for SymboLR.
 
 Provides both real (PyTorch-backed) and synthetic (numpy-only) fitness
 evaluation. The synthetic mode simulates training dynamics on a quadratic
 loss landscape, producing realistic loss curves that respond meaningfully
-to schedule quality — making cloud demos actually useful.
-
-The key insight: a good LR schedule should produce a learning rate that:
-  1. Starts high enough to make progress
-  2. Decays to allow convergence
-  3. Avoids explosion (too-high LR) or stagnation (too-low LR)
-  4. Uses the time variable t (not constant)
+to schedule quality
 """
 
 from __future__ import annotations
@@ -76,7 +70,7 @@ def evaluate_synthetic(lr_schedule: np.ndarray) -> float:
         target_min, target_max = 1e-4, 0.03
         normalized = target_min + (lr_schedule - lr_min) / lr_range * (target_max - target_min)
     else:
-        # Constant schedule — map to a fixed moderate LR
+        # Constant schedule - map to a fixed moderate LR
         mean_lr = np.mean(lr_schedule)
         # Constant schedules should get a reasonable but not great fitness
         normalized = np.full(n_steps, 0.01)
@@ -85,13 +79,13 @@ def evaluate_synthetic(lr_schedule: np.ndarray) -> float:
     n_dims = 5
     rng = np.random.RandomState(cfg.seed)
 
-    # Initial weights — scattered around the optimum
+    # Initial weights - scattered around the optimum
     w = rng.randn(n_dims) * 2.0
 
     # Optimal weights
     w_star = np.zeros(n_dims)
 
-    # Curvature per dimension (heterogeneous — mimics real loss landscapes)
+    # Curvature per dimension (heterogeneous - mimics real loss landscapes)
     curvatures = np.array([0.5, 1.0, 2.0, 4.0, 8.0])
 
     # Track loss trajectory

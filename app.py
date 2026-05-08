@@ -1,10 +1,10 @@
 """
-app.py — SymboLR dashboard entry point.
+app.py - SymboLR dashboard entry point.
 
 Responsibilities:
   1. Streamlit page config
   2. Theme injection
-  3. Sidebar — logo, navigation, configuration, run controls, live stats
+  3. Sidebar - logo, navigation, configuration, run controls, live stats
   4. Route to the correct page module
   5. Launch background evolution runs
   6. Non-blocking live progress via st.fragment(run_every=...)
@@ -13,7 +13,7 @@ Responsibilities:
 import streamlit as st
 
 st.set_page_config(
-    page_title="SymboLR — Symbolic Learning Rate Discovery",
+    page_title="SymboLR - Symbolic Learning Rate Discovery",
     page_icon="🧬",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -21,7 +21,7 @@ st.set_page_config(
 
 from ui.theme import inject_theme
 from ui.state import init_state, sync_state, start_evolution, TORCH_AVAILABLE
-from ui.pages import overview, methodology, evolution_lab, results, insights
+from ui.pages import overview, methodology, evolution_lab, results, insights, rust_core
 from config.settings import get_config
 
 cfg = get_config()
@@ -41,13 +41,13 @@ with st.sidebar:
     # Runtime mode banner
     if cfg.is_cloud:
         st.warning(
-            "☁️ **Cloud Mode** — Using synthetic fitness simulation. "
+            "☁️ **Cloud Mode** - Using synthetic fitness simulation. "
             "For GPU-accelerated discovery, run locally."
         )
     elif cfg.is_gpu:
-        st.success(f"🚀 **GPU Mode** — Full CUDA acceleration active.")
+        st.success(f"🚀 **GPU Mode** - Full CUDA acceleration active.")
     else:
-        st.info("💻 **CPU Mode** — PyTorch running on CPU.")
+        st.info("💻 **CPU Mode** - PyTorch running on CPU.")
 
     st.markdown('<div class="nav-section-label">Navigation</div>', unsafe_allow_html=True)
     page = st.radio(
@@ -58,6 +58,7 @@ with st.sidebar:
             "🚀  Evolution Lab",
             "📊  Results & Analysis",
             "⚡  Insights & Deploy",
+            "🦀  Rust Core",
         ],
         label_visibility="collapsed",
     )
@@ -148,3 +149,5 @@ elif "Results" in page:
     results.render()
 elif "Insights" in page:
     insights.render()
+elif "Rust Core" in page:
+    rust_core.render()

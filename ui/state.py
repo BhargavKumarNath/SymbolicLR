@@ -1,5 +1,5 @@
 """
-ui/state.py — Session-state management and background evolution job runner.
+ui/state.py - Session-state management and background evolution job runner.
 
 Refactored to use:
   - config.settings for centralized configuration
@@ -266,7 +266,7 @@ def _setup_evaluation_stack(epochs: int, workers: int):
         trainer = ProbeTrainer(device=device, patience=cfg.patience, amp_enabled=cfg.amp_enabled)
         model_factory = lambda: create_compiled_model(device, in_channels=1)
     else:
-        # CPU and Cloud modes use synthetic fitness — fast and meaningful
+        # CPU and Cloud modes use synthetic fitness - fast and meaningful
         train_loader = None
         val_loader = None
         trainer = None
@@ -402,7 +402,7 @@ def _run_evolution_job(
                             _store_run_state(
                                 run_id,
                                 phase_label=(
-                                    f"Generation {gen}: CUDA OOM — retrying with "
+                                    f"Generation {gen}: CUDA OOM - retrying with "
                                     f"{current_workers} worker(s)"
                                 ),
                             )

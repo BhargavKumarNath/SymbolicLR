@@ -1,5 +1,5 @@
 """
-ui/pages/evolution_lab.py — Page 3: Live Evolution Lab.
+ui/pages/evolution_lab.py - Page 3: Live Evolution Lab.
 """
 
 import streamlit as st
@@ -14,7 +14,7 @@ def _empty_state_notice():
     mode_hint = ""
     if cfg.is_cloud:
         mode_hint = (
-            " The cloud version uses a synthetic fitness simulation — "
+            " The cloud version uses a synthetic fitness simulation - "
             "evolution will produce meaningful results in seconds."
         )
     st.markdown(f"""

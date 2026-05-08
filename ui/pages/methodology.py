@@ -1,5 +1,5 @@
 """
-ui/pages/methodology.py — Page 2: How SymboLR Works.
+ui/pages/methodology.py - Page 2: How SymboLR Works.
 
 Technical deep-dive with interactive elements that connect to real system state.
 """
@@ -33,7 +33,7 @@ def render():
             "Overview",
             "Genetic Programming (GP) treats mathematical formulas as programs represented "
             "as Abstract Syntax Trees (ASTs). The evolutionary loop applies biologically-inspired "
-            "operators — crossover, mutation, and selection — to a population of ASTs, iteratively "
+            "operators - crossover, mutation, and selection - to a population of ASTs, iteratively "
             "improving their fitness against a defined objective (validation loss).",
             accent="green",
         )
@@ -106,7 +106,7 @@ def render():
             )
             info_card(
                 "🎲  Parent Selection",
-                "Parents are sampled <em>uniformly at random</em> from all occupied niches — "
+                "Parents are sampled <em>uniformly at random</em> from all occupied niches - "
                 "not by fitness rank. This gives rare formulas equal reproductive opportunity, "
                 "strongly protecting diversity across generations.",
             )
@@ -136,7 +136,7 @@ def render():
 
         if cfg.is_cloud:
             st.info(
-                "☁️ **Cloud Mode Active** — Using synthetic fitness simulation (gradient descent on a "
+                "☁️ **Cloud Mode Active** - Using synthetic fitness simulation (gradient descent on a "
                 "quadratic loss landscape). This produces realistic convergence dynamics without "
                 "requiring PyTorch or GPU hardware."
             )
@@ -147,7 +147,7 @@ def render():
                 "🟢  Low Fidelity",
                 "<strong>5% of MNIST</strong> (~3,000 samples). Used during GP evolution for "
                 "rapid candidate screening. Entire dataset pinned to GPU VRAM via custom "
-                "<code>VRAMDataLoader</code> — zero PCIe transfer overhead per batch.",
+                "<code>VRAMDataLoader</code> - zero PCIe transfer overhead per batch.",
                 accent="green",
             )
         with c2:
@@ -176,7 +176,7 @@ def render():
                 "<code>[0.5, 1.0, 2.0, 4.0, 8.0]</code>. The simulation includes stochastic "
                 "gradient noise, mini-batch variance, and convergence/divergence detection. "
                 "This produces realistic fitness signals that meaningfully differentiate "
-                "between schedule quality — good schedules converge, bad ones diverge.",
+                "between schedule quality - good schedules converge, bad ones diverge.",
                 accent="blue",
             )
 
@@ -202,13 +202,13 @@ def render():
             "Operator":   ["+", "−", "×", "÷", "sin", "cos", "exp", "log", "√", "|x|"],
             "Arity":      [2, 2, 2, 2, 1, 1, 1, 1, 1, 1],
             "Protection": [
-                "—", "—", "—",
+                " - ", " - ", " - ",
                 "Returns 1.0 if |denom| < 1e−6",
-                "—", "—",
+                " - ", " - ",
                 "Clamps exponent to [−100, 10]",
                 "log(max(|x|, 1e−6))",
                 "Operates on |x|",
-                "—",
+                " - ",
             ],
             "Role": [
                 "Additive combination",

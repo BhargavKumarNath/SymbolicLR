@@ -1,5 +1,5 @@
 """
-config/settings.py — Central configuration with auto-detection of runtime capabilities.
+config/settings.py - Central configuration with auto-detection of runtime capabilities.
 
 Detects whether
 PyTorch, CUDA, and the Rust extension are available, then selects the
@@ -16,9 +16,9 @@ from typing import Any, Optional
 
 class RuntimeMode(enum.Enum):
     """Execution environment."""
-    CLOUD_CPU = "cloud_cpu"       # Streamlit Cloud — no torch, no Rust
-    LOCAL_CPU = "local_cpu"       # Local machine — torch on CPU
-    LOCAL_GPU = "local_gpu"       # Local machine — torch with CUDA
+    CLOUD_CPU = "cloud_cpu"       # Streamlit Cloud - no torch, no Rust
+    LOCAL_CPU = "local_cpu"       # Local machine - torch on CPU
+    LOCAL_GPU = "local_gpu"       # Local machine - torch with CUDA
 
 
 def _detect_torch() -> bool:
@@ -140,7 +140,7 @@ class SymboLRConfig:
             return 1
         if not self.is_gpu:
             return min(requested, 4, pop_size)
-        # GPU caps — conservative to prevent CUDA OOM
+        # GPU caps - conservative to prevent CUDA OOM
         if epochs >= 5 or pop_size >= 100:
             safe_cap = 1
         elif epochs >= 3 or pop_size >= 60:

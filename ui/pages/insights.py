@@ -1,5 +1,5 @@
 """
-ui/pages/insights.py — Page 5: Insights, Deployment Guide, and Engineering Rationale.
+ui/pages/insights.py - Page 5: Insights, Deployment Guide, and Engineering Rationale.
 
 Combines research findings with practical deployment information.
 Dynamic insights derived from run data when available.
@@ -14,7 +14,7 @@ _FINDINGS = [
     ("📉  Early Warmup is Almost Universal",
      "Across all discovered elite formulas, schedules with center-of-mass below 0.5 "
      "consistently outperform late-heavy schedules. The model needs stable gradients "
-     "early — aggressive initial learning rates cause irreversible damage to the loss landscape.",
+     "early - aggressive initial learning rates cause irreversible damage to the loss landscape.",
      "green"),
     ("📐  Compact Beats Complex",
      "The best-performing formulas almost never exceed 7–9 AST nodes. Simplicity correlates "
@@ -23,7 +23,7 @@ _FINDINGS = [
      "blue"),
     ("🔄  Oscillatory Schedules Surprise",
      "MAP-Elites consistently discovers periodic sin/cos-based formulas that achieve competitive "
-     "validation loss. These emerge as structurally equivalent to warmup-with-restarts — but "
+     "validation loss. These emerge as structurally equivalent to warmup-with-restarts - but "
      "arise purely from the fitness signal, without any human prior.",
      "amber"),
     ("🧮  The t Variable is Non-Negotiable",
@@ -37,7 +37,7 @@ _ENGINEERING = [
     ("Why Rust for evaluation?",
      "Python AST traversal with NumPy incurs significant per-call overhead when evaluating "
      "hundreds of formulas per generation. The Rust PyO3 extension parses prefix notation once "
-     "and evaluates element-wise in a single tight loop — achieving ~10–50× throughput "
+     "and evaluates element-wise in a single tight loop - achieving ~10–50× throughput "
      "improvement over pure Python for complex expressions."),
     ("Why VRAM-resident DataLoader?",
      "Standard PyTorch DataLoaders involve CPU→GPU PCIe transfers every batch. With 8 GB VRAM "

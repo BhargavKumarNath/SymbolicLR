@@ -1,5 +1,5 @@
 """
-config — Central configuration for SymboLR.
+config - Central configuration for SymboLR.
 """
 from config.settings import get_config, SymboLRConfig, RuntimeMode
 

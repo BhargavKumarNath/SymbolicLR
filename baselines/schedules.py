@@ -1,5 +1,5 @@
 """
-baselines/schedules.py — Standard LR schedule implementations.
+baselines/schedules.py - Standard LR schedule implementations.
 
 Each function takes a normalized time array t ∈ [0, 1] and returns
 an array of learning rates. These are used for:

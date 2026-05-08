@@ -1,5 +1,5 @@
 """
-gp/evaluator.py — Parallel population evaluation.
+gp/evaluator.py - Parallel population evaluation.
 
 Orchestrates concurrent fitness evaluation using either real PyTorch
 training or the synthetic fitness function, depending on runtime mode.
@@ -55,7 +55,6 @@ class ParallelEvaluator:
     ) -> List[float]:
         """
         Evaluates the entire generation concurrently.
-        max_workers=4 is heavily optimized for an 8GB RTX 4070 avoiding OOM issues.
         """
         total = len(population)
         if total == 0:

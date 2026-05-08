@@ -1,5 +1,5 @@
 """
-ui/charts.py — Altair chart factories for SymboLR dashboard.
+ui/charts.py - Altair chart factories for SymboLR dashboard.
 Every function accepts plain Python data structures and returns an alt.Chart.
 
 """

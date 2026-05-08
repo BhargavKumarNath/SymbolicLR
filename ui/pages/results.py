@@ -1,5 +1,5 @@
 """
-ui/pages/results.py — Page 4: Results & Analysis.
+ui/pages/results.py - Page 4: Results & Analysis.
 Real convergence curves, computed baseline comparison, and Hall of Fame detail.
 """
 
@@ -58,7 +58,7 @@ def render():
 
     # Hall of Fame detail table
     if hof:
-        section_header("Hall of Fame — Full Detail", "Discovered Formulas")
+        section_header("Hall of Fame - Full Detail", "Discovered Formulas")
         md_table = "| Rank | Val Loss | Nodes | Depth | Formula | Prefix |\n|---|---|---|---|---|---|\n"
         for i, (loss, tree) in enumerate(hof):
             prefix = tree.to_prefix()

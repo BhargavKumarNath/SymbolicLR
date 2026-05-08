@@ -1,5 +1,5 @@
 """
-gp/map_elites.py — MAP-Elites Quality-Diversity Archive.
+gp/map_elites.py - MAP-Elites Quality-Diversity Archive.
 
 Maintains a 2D grid of elite individuals based on behavioral descriptors.
 Optimizes for Quality-Diversity: finding the best loss in every possible niche.

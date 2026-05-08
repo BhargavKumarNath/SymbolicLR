@@ -1,5 +1,5 @@
 """
-gp/rust_bridge.py — Single source of truth for Rust/mock schedule evaluation.
+gp/rust_bridge.py - Single source of truth for Rust/mock schedule evaluation.
 
 When the Rust extension is available, delegates to symbolr_rust.evaluate_fast.
 Otherwise, falls back to the Python Node.evaluate() method
@@ -26,9 +26,6 @@ def evaluate_schedule(tree: "Node", t_array: np.ndarray) -> np.ndarray:
     """
     Evaluate a GP tree over a time array and return the LR schedule.
 
-    Uses the Rust extension when available, otherwise falls back to the
-    Python AST evaluator.
-
     Args:
         tree: A SymboLR AST Node representing a formula.
         t_array: 1D numpy array of normalized time steps in [0, 1].
@@ -48,7 +45,7 @@ def evaluate_schedule(tree: "Node", t_array: np.ndarray) -> np.ndarray:
         result = np.clip(result, 1e-7, 10.0)
         return result
     except Exception:
-        # Fail gracefully — return a safe constant schedule
+        # Fail gracefully - return a safe constant schedule
         return np.full_like(t_array, 1e-3)
 
 

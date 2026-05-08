@@ -1,5 +1,5 @@
 """
-optimiser/compare.py — Run and cache baseline comparisons.
+optimiser/compare.py - Run and cache baseline comparisons.
 
 Provides cached baseline benchmark results that are computed once
 per session and reused across dashboard rerenders.

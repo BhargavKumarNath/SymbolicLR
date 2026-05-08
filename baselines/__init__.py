@@ -1,1 +1,1 @@
-"""baselines — Standard LR schedule implementations."""
+"""baselines - Standard LR schedule implementations."""
