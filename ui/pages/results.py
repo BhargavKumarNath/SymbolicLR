@@ -57,13 +57,34 @@ def render():
         )
 
     # Hall of Fame detail table
+    # Hall of Fame detail table
     if hof:
         section_header("Hall of Fame - Full Detail", "Discovered Formulas")
-        md_table = "| Rank | Val Loss | Nodes | Depth | Formula | Prefix |\n|---|---|---|---|---|---|\n"
+        
+        # Create a header row using native Streamlit columns
+        h1, h2, h3, h4, h5 = st.columns([0.5, 1, 1, 4, 3])
+        h1.caption("RANK")
+        h2.caption("VAL LOSS")
+        h3.caption("NODES / DEPTH")
+        h4.caption("FORMULA")
+        h5.caption("PREFIX AST")
+        
+        st.markdown("<hr style='margin:0.5em 0; border-color: var(--border);'>", unsafe_allow_html=True)
+        
         for i, (loss, tree) in enumerate(hof):
             prefix = tree.to_prefix()
-            prefix_trunc = prefix[:60] + ("..." if len(prefix) > 60 else "")
+            prefix_trunc = prefix[:50] + ("..." if len(prefix) > 50 else "")
             latex = tree_to_latex(tree)
-            md_table += f"| {i + 1} | {loss:.5f} | {tree.size()} | {tree.depth()} | ${latex}$ | `{prefix_trunc}` |\n"
             
-        st.markdown(md_table)
+            # Create a row for each formula
+            c1, c2, c3, c4, c5 = st.columns([0.5, 1, 1, 4, 3])
+            c1.markdown(f"**#{i + 1}**")
+            c2.markdown(f"`{loss:.5f}`")
+            c3.markdown(f"{tree.size()} ({tree.depth()}d)")
+            
+            # The math is now safely isolated in its own column container
+            c4.markdown(f"${latex}$")
+            
+            c5.markdown(f"`{prefix_trunc}`")
+            
+            st.markdown("<hr style='margin:0.5em 0; border-color: var(--border-bright);'>", unsafe_allow_html=True)

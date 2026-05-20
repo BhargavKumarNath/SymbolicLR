@@ -570,23 +570,22 @@ def info_card(title: str, body: str, accent: str = ""):
 def formula_block(rank: int, loss: float, size: int, depth: int, latex: str):
     medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
     medal = medals[rank - 1] if rank <= len(medals) else f"#{rank}"
+    
     st.markdown(f"""
 <div class="formula-block">
-    <div>
-        <div class="fb-rank">{medal}  Rank {rank}</div>
+<div class="fb-rank">{medal}  Rank {rank}</div>
 
 $$
 {latex}
 $$
 
-        <div class="fb-meta">
-            <span class="fb-tag">LOSS <span>{loss:.4f}</span></span>
-            <span class="fb-tag">NODES <span>{size}</span></span>
-            <span class="fb-tag">DEPTH <span>{depth}</span></span>
-        </div>
-    </div>
+<div class="fb-meta">
+<span class="fb-tag">LOSS <span>{loss:.4f}</span></span>
+<span class="fb-tag">NODES <span>{size}</span></span>
+<span class="fb-tag">DEPTH <span>{depth}</span></span>
 </div>
-    """, unsafe_allow_html=True)
+</div>
+""", unsafe_allow_html=True)
 
 
 def baseline_row(name: str, loss: float, worst: float, is_winner: bool = False):

@@ -50,39 +50,44 @@ def render():
             )
 
         import textwrap
-        st.markdown(textwrap.dedent("""\
-        #### Python to Rust Data Flow
+        st.markdown("#### Python to Rust Data Flow")
         
-        ```mermaid
-        graph TD
-            subgraph Python [Python Engine]
-                A[Extract prefix string from Node tree]
-                A_desc[Tree: Node with children 0.5 and t => Prefix: * 0.5 t]
-                B[Pass string and time array to Rust binding]
-                A --> A_desc
-                A_desc --> B
-            end
-
-            subgraph Rust [Rust Core]
-                C[Parse prefix tokens into Rust Enum]
-                D[Recursively evaluate tree for time array]
-                E[Apply math protections]
-                C --> D
-                D --> E
-            end
-
-            subgraph Output [Output Array]
-                F[Return computed learning rate array to Python]
-            end
-
-            B -->|Zero-Copy Transfer| C
-            E -->|Computed Result| F
+        flow_html = """
+        <div style="display: flex; flex-direction: column; gap: 8px; max-width: 100%; margin: 16px 0;">
             
-            style Python fill:#1c2536,stroke:#2d3a54,color:#fff
-            style Rust fill:#361c1c,stroke:#542d2d,color:#fff
-            style Output fill:#1c3625,stroke:#2d543a,color:#fff
-        ```
-        """))
+            <div style="background: var(--bg-raised); border: 1px solid var(--border); border-left: 4px solid var(--accent-blue); border-radius: 8px; padding: 16px;">
+                <div style="font-family: var(--font-mono); font-size: 12px; color: var(--accent-blue); margin-bottom: 8px; letter-spacing: 1px;">[PYTHON: gp/evaluator.py]</div>
+                <div style="font-size: 14px; color: var(--text-secondary); line-height: 1.6;">
+                    <strong>1.</strong> Extract prefix string from Node tree<br>
+                    <span style="color: var(--text-muted); font-size: 13px; font-family: var(--font-mono); margin-left: 16px;">Node('*', [0.5, 't'])  =&gt;  "* 0.5 t"</span><br>
+                    <strong>2.</strong> Pass string and time array to Rust <code>evaluate_schedule_rust()</code>
+                </div>
+            </div>
+            
+            <div style="text-align: center; color: var(--border-bright); font-size: 20px;">↓</div>
+            
+            <div style="background: var(--bg-raised); border: 1px solid var(--border); border-left: 4px solid var(--accent-rose); border-radius: 8px; padding: 16px;">
+                <div style="font-family: var(--font-mono); font-size: 12px; color: var(--accent-rose); margin-bottom: 8px; letter-spacing: 1px;">[RUST: rust_core/src/lib.rs]</div>
+                <div style="font-size: 14px; color: var(--text-secondary); line-height: 1.6;">
+                    <strong>3.</strong> Parse prefix tokens into a Rust Enum (Op / Var / Const)<br>
+                    <strong>4.</strong> Recursively evaluate the tree for the entire time array<br>
+                    <strong>5.</strong> Apply math protections (e.g., division by zero)
+                </div>
+            </div>
+            
+            <div style="text-align: center; color: var(--border-bright); font-size: 20px;">↓</div>
+            
+            <div style="background: var(--bg-raised); border: 1px solid var(--border); border-left: 4px solid var(--accent-green); border-radius: 8px; padding: 16px;">
+                <div style="font-family: var(--font-mono); font-size: 12px; color: var(--accent-green); margin-bottom: 8px; letter-spacing: 1px;">[PYTHON: NumPy Array]</div>
+                <div style="font-size: 14px; color: var(--text-secondary); line-height: 1.6;">
+                    <strong>6.</strong> Return the computed learning rate array directly back to Python via PyO3 zero-copy
+                </div>
+            </div>
+            
+        </div>
+        """
+        
+        st.html(flow_html)
 
     with tab_perf:
         section_header("Why Rust? The Performance Gap", "Benchmarking")
@@ -92,15 +97,15 @@ def render():
             "In SymboLR, a population of 100 schedules evaluated over 50 generations requires "
             "5,000 full schedule evaluations. If formulas are deep, pure Python recursion overhead "
             "dominates the runtime. The Rust core executes the same math approximately "
-            "<strong>10× to 50× faster</strong> depending on formula complexity.",
+            "<strong>10x to 50x faster</strong> depending on formula complexity.",
             accent="green"
         )
         
         # Simulated benchmark table for illustration
         bench_data = pd.DataFrame([
-            {"Formula Complexity": "Shallow (2-3 nodes)", "Pure Python (NumPy)": "1.2 ms", "Rust (PyO3)": "0.1 ms", "Speedup": "12×"},
-            {"Formula Complexity": "Medium (5-8 nodes)", "Pure Python (NumPy)": "3.8 ms", "Rust (PyO3)": "0.15 ms", "Speedup": "25×"},
-            {"Formula Complexity": "Deep (12+ nodes)", "Pure Python (NumPy)": "9.5 ms", "Rust (PyO3)": "0.2 ms", "Speedup": "47×"}
+            {"Formula Complexity": "Shallow (2-3 nodes)", "Pure Python (NumPy)": "1.2 ms", "Rust (PyO3)": "0.1 ms", "Speedup": "12x"},
+            {"Formula Complexity": "Medium (5-8 nodes)", "Pure Python (NumPy)": "3.8 ms", "Rust (PyO3)": "0.15 ms", "Speedup": "25x"},
+            {"Formula Complexity": "Deep (12+ nodes)", "Pure Python (NumPy)": "9.5 ms", "Rust (PyO3)": "0.2 ms", "Speedup": "47x"}
         ])
         
         st.markdown("#### Evaluation Time per Candidate (10,000 time steps)")
