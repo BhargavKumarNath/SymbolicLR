@@ -571,21 +571,21 @@ def formula_block(rank: int, loss: float, size: int, depth: int, latex: str):
     medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
     medal = medals[rank - 1] if rank <= len(medals) else f"#{rank}"
     st.markdown(f"""
-    <div class="formula-block">
-        <div>
-            <div class="fb-rank">{medal}  Rank {rank}</div>
+<div class="formula-block">
+    <div>
+        <div class="fb-rank">{medal}  Rank {rank}</div>
 
 $$
 {latex}
 $$
 
-            <div class="fb-meta">
-                <span class="fb-tag">LOSS <span>{loss:.4f}</span></span>
-                <span class="fb-tag">NODES <span>{size}</span></span>
-                <span class="fb-tag">DEPTH <span>{depth}</span></span>
-            </div>
+        <div class="fb-meta">
+            <span class="fb-tag">LOSS <span>{loss:.4f}</span></span>
+            <span class="fb-tag">NODES <span>{size}</span></span>
+            <span class="fb-tag">DEPTH <span>{depth}</span></span>
         </div>
     </div>
+</div>
     """, unsafe_allow_html=True)
 
 

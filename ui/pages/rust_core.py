@@ -49,25 +49,40 @@ def render():
                 accent="blue"
             )
 
-        st.markdown("""
+        import textwrap
+        st.markdown(textwrap.dedent("""\
         #### Python to Rust Data Flow
-        ```text
-        [Python: gp/evaluator.py]
-            1. Extract prefix string from Node tree
-               Tree: Node('*', [Node(0.5), Node('t')])  =>  Prefix: "* 0.5 t"
-            2. Pass to Rust evaluate_schedule_rust()
-                 │
-                 ▼
-        [Rust: rust_core/src/lib.rs]
-            3. Parse prefix tokens into a Rust Enum (Op/Var/Const)
-            4. Recursively evaluate the tree for the entire time array t
-            5. Apply math protections (e.g., division by zero)
-                 │
-                 ▼
-        [Python: Numpy Array]
-            6. Return computed learning rate array directly to Python
+        
+        ```mermaid
+        graph TD
+            subgraph Python [Python Engine]
+                A[Extract prefix string from Node tree]
+                A_desc[Tree: Node with children 0.5 and t => Prefix: * 0.5 t]
+                B[Pass string and time array to Rust binding]
+                A --> A_desc
+                A_desc --> B
+            end
+
+            subgraph Rust [Rust Core]
+                C[Parse prefix tokens into Rust Enum]
+                D[Recursively evaluate tree for time array]
+                E[Apply math protections]
+                C --> D
+                D --> E
+            end
+
+            subgraph Output [Output Array]
+                F[Return computed learning rate array to Python]
+            end
+
+            B -->|Zero-Copy Transfer| C
+            E -->|Computed Result| F
+            
+            style Python fill:#1c2536,stroke:#2d3a54,color:#fff
+            style Rust fill:#361c1c,stroke:#542d2d,color:#fff
+            style Output fill:#1c3625,stroke:#2d543a,color:#fff
         ```
-        """)
+        """))
 
     with tab_perf:
         section_header("Why Rust? The Performance Gap", "Benchmarking")

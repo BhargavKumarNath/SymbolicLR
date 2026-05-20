@@ -34,3 +34,4 @@ graphify-out/
 .pytest_cache/
 htmlcov/
 .coverage
+.gitignore
