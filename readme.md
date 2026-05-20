@@ -1,423 +1,353 @@
-# SymboLR: Comprehensive System Analysis
-> A Genetic Programming Framework for Symbolic Learning Rate Discovery
+# SymboLR: Symbolic Learning Rate Discovery
+
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![PyTorch 2.1+](https://img.shields.io/badge/pytorch-2.1%2B-orange.svg)](https://pytorch.org/)
+[![Rust](https://img.shields.io/badge/rust-pyo3%2Fmaturin-red.svg)](https://pyo3.rs/)
+[![Streamlit](https://img.shields.io/badge/dashboard-streamlit-ff4b4b.svg)](https://streamlit.io/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Live Demo](https://img.shields.io/badge/demo-streamlit%20cloud-brightgreen)](https://your-app.streamlit.app)
+ 
+> A Quality-Diversity Genetic Programming system that autonomously evolves symbolic mathematical learning rate schedules for neural networks, benchmarks them against production baselines, and renders discovered formulas as human-readable LaTeX via a live Streamlit analysis dashboard.
 
 ---
 
-## Table of Contents
+## The Problem
+
+The learning rate schedule is the single most consequential hyperparameter in neural network training. A well-shaped schedule, one that warms up early, decays gracefully, and avoids stagnation, can be the difference between a model that converges in 20 epochs and one that never converges at all. Despite this, practitioners choose from a small, historically-accumulated set of hand-crafted functions: cosine annealing, step decay, warm restarts, 1-cycle. These are reasonable, but they represent an infinitesimally small slice of all possible mathematical schedules.
  
-1. [System Overview](#1-system-overview)
-2. [Architecture & Workflow](#2-architecture--workflow)
-3. [Data & Knowledge Base](#3-data--knowledge-base)
-4. [Key Features & Innovations](#4-key-features--innovations)
-5. [Strengths, Limitations & Improvements](#5-strengths-limitations--improvements)
+The question SymboLR asks is: what if you could search the full space of valid mathematical expressions and let the training signal itself tell you which shape is optimal?
+ 
+This is the symbolic regression framing. The schedule `η(t)` is not a fixed functional form with tunable constants. It is an unknown mathematical expression built from primitive operations `{+, -, *, /, sin, cos, exp, log, sqrt, abs}` and the normalized training time variable `t ∈ [0, 1]`. The search problem is to find the expression that minimizes validation loss when used as a learning rate schedule during probe training. SymboLR solves this using Genetic Programming, with MAP-Elites as the selection mechanism to prevent premature convergence and maintain a behaviorally diverse archive of solutions.
 
 ---
 
-## 1. System Overview
-### What SymboLR Does
-SymboLR is a **Quality-Diversity Genetic Programming** system that autonomously evolves mathematical formulas for neural network learning rate schedules. Rather than using hand-crafted schedules like cosine annealing or step decay, SymboLR treats the schedule discovery problem as a **symbolic regression** task: Given only a probe model, a dataset, and a training budget, it searches the space of all possible mathematical expressions and returns the formulas that minimize validation loss.
- 
-The discovered schedules are represented as **Abstract Syntax Trees (ASTs)**, evaluated via a compiled Rust extension, and maintained in a **MAP-Elites behavioral archive** that simultaneously optimizes for both quality (low validation loss) and diversity (schedules with different complexity/timing characteristics).
+## System Architecture
 
-### Core Objectives
+The pipeline is sequential but the critical inner loop, fitness evaluation, is parallelized across threads. At a high level:
 
-- **Automate Schedule Design**: Replace human intuition about warmup, decay, and oscillation with evolved symbolic expressions.
-- **Maintain Behavioral Diversity**: Use Quality-Diversity optimisation to ensure the archive contains fundamentally different types of schedules, not just slight variations of one winner.
-- **Maximize Evaluation Throughput**: Accelerate the inner fitness loop via Rust-compiled AST evaluation, VRAM-resident data loading, and AMP-enabled GPU training.
-- **Produce Human-Interpretable Results**: Algebraically simplify discovered formulas via SymPy CAS and render them as LaTeX, so a practitioner can understand and trust what was found.
-- **Compare Against Baselines**: Benchmark discovered schedules against cosine annealing, step decay, warm restarts, linear decay, and constant LR.
+```
+Ramped H&H Init
+      |
+      v
+Parallel Fitness Evaluation  <--------------------+
+  (Rust AST eval + GPU probe training)            |
+      |                                           |
+      v                                           |
+MAP-Elites Archive (try_add)                      |
+      |                                           |
+      v                                           |
+Sample Parents (uniform over niches)              |
+      |                                           |
+      v                                           |
+Genetic Operators                                 |
+  50% Subtree Crossover                           |
+  25% Subtree Mutation                            |
+  25% Hoist Mutation (anti-bloat)                 |
+      |                                           |
+      v                                           |
+SymPy Simplification (lazy, pre-insertion)        |
+      |                                           |
+      +------------------------------------------+
+      |
+      v (after final generation)
+L-BFGS-B Constant Refinement (Hall of Fame)
+      |
+      v
+LaTeX Output + Dashboard
+```
 
-### Primary Use Cases
-
-- Research into the geometry of the neural network loss landscape and how learning rate dynamics interact with it.
-- AutoML pipelines where training schedules need to be tailored to specific architectures or datasets.
-- Portfolio demonstration of production-grade systems integrating evolutionary computation, GPU-accelerated ML, Rust/Python interop, and modern UI engineering.
+Each of these components has specific rationale. The sections below explain not just what each component does but why it was designed the way it is.
 
 ---
 
-## 2. Architecture & Workflow
+## Genetic Programming and the AST Representation
 
-### High-Level Pipeline
+Think of Genetic Programming (GP) as treating mathematical formulas like miniature computer programs. Instead of parsing a formula like `0.5 * (1 - t)` as a plain string, the system structures it as an Abstract Syntax Tree (AST).
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                        SymboLR Pipeline                                 │
-│                                                                         │
-│  ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐            │
-│  │  Init    │──▶│ Evaluate │──▶│ Archive  │──▶│  Evolve  │──┐         │
-│  │ Ramped   │   │ Rust+GPU │   │MAP-Elites│   │3 Operators│  │         │
-│  │ H&H Pop  │   │Concurrent│   │  2D Grid │   │ Xover/Mut│  │         │
-│  └──────────┘   └──────────┘   └──────────┘   └──────────┘  │         │
-│                                                               │ loop    │
-│  ┌──────────┐   ┌──────────┐   ┌──────────┐                 │         │
-│  │ Hall of  │◀──│  L-BFGS-B│◀──│  SymPy   │◀────────────────┘         │
-│  │  Fame    │   │ Memetic  │   │Simplify  │                            │
-│  │  Output  │   │ Refine   │   │  Trees   │                            │
-│  └──────────┘   └──────────┘   └──────────┘                            │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+In this tree, the multiplication operator acts as the root, its left branch holds the constant `0.5`, and its right branch points to a subtraction operator splitting into `1.0` and `t`. Under the hood, every single piece of this tree is just an instance of the `Node` class found in `gp/tree.py`.
 
-### Component Breakdown
+Each `Node` tracks three core attributes:
 
-#### 2.1 Population Initialization (`gp/population.py`)
+* **A value:** This can be an operator name, the variable `'t'`, or a float constant.
+* **Children:** A list pointing to the nodes directly underneath it.
+* **An MD5 hash:** A cached fingerprint of the node's structure.
 
-The system uses **Ramped Half-and-Half** to bootstrap generation zero. This is a cannonical GP in inialization strategy that maximizes structural diversity before a single evaluation is run.
+That cached hash is a massive performance lifesaver. Whenever a genetic operation alters a subtree, the system runs `invalidate_cache()` to clear out old hashes. When a new formula is generated, the system checks this hash first. If the new formula matches an identical twin already sitting in the archive, the cache comparison short-circuits the entire process. This saves you from burning time re-running the Rust evaluator or spinning up a GPU training loop for a formula you have already seen.
 
-- The population is divided evenly across depth levels from `min_depth` to `max_depth`.
-- Within each depth level, half the individuals use the `full` method (symmetric trees where every branch reaches the maximum depth) and half use `grow` (asymmetric trees with a 50% terminal probability at each node).
-- Terminals consist of the time variable `t` plus nine float constants `{0.1, 0.2, ..., 0.9}`.
-- Operators are drawn from a registry of 10 protected mathematical functions (see Section 5).
+Over in `gp/operators.py`, the system relies on a curated set of 10 primitive operators, divided into binary and unary types. Every operator has a specific job:
 
-```python
-# From gp/population.py
-def ramped_half_and_half(pop_size, min_depth, max_depth):
-    for i in range(pop_size):
-        depth = depths[i % len(depths)]
-        method = 'full' if i % 2 == 0 else 'grow'
-        population.append(generate_tree(1, depth, method))
-```
+* **Standard arithmetic** builds linear and polynomial schedules.
+* `sin` and `cos` handle periodic oscillations.
+* `exp` and `log` manage exponential warmup and decay.
+* `sqrt` allows for sub-linear growth.
 
-#### 2.2 AST Representation (`gp/tree.py`)
+Because GP can generate some wild, unpredictable expressions, every operator includes built-in safety guards to prevent the whole system from crashing during evaluation:
 
-Each individual is a `Node` object forming a recursive AST. Nodes can be:
+* **Division** returns `1.0` if the denominator drops below `1e-6`.
+* **Log** wraps its input in `max(|x|, 1e-6)` to gracefully handle zero or negative numbers.
+* **Sqrt** uses absolute values (`|x|`) to dodge negative input errors.
+* **Exp** clamps its arguments between -100 and 10 so it does not explode into infinity.
 
-- **Operator Nodes**: Binary (`+`, `-`, `*`, `/`) or unary (`sin`, `cos`, `exp`, `log`, `sqrt`, `abs`)
-- **Variable Terminals**: The string `'t'`, representing normalized training time in `[0, 1]`
-- **Constant Terminals**: Python `float` values
+These safety guards have to be perfectly mirrored across both the Python and Rust evaluators. The test suite in `test_rust_core.py` strictly checks that both backends match down to a `1e-7` tolerance. If they diverge even slightly, the system would calculate different fitness scores depending on which backend was running, completely corrupting the data archive.
 
-Key design decisions:
+### Initial Population: Ramped Half-and-Half
+
+To kick things off, the system builds the very first generation of formulas using the ramped half-and-half method inside `gp/population.py`. It splits the population evenly across different depth levels, starting from a `min_depth` of 2 up to a `max_depth` of 4 if you are running in dashboard mode, or 5 if you are on the CLI.
+
+Within each of those depth levels, the population is split down the middle into two distinct strategy camps:
+
+* **The `full` method (50%):** This forces every single branch to grow all the way out to the maximum allowed depth, giving you perfectly symmetric, deep trees.
+* **The `grow` method (50%):** This introduces a 50% chance of placing a terminal (a constant or variable) at any given node. This naturally cuts branches short, producing asymmetric trees with highly variable depths.
+
+All of this structural engineering comes down to one goal: maximizing diversity right at initialization.
+
+A classic way Genetic Programming runs off the rails is when the initial population looks too much alike. If the starting pool is structurally homogeneous, the evolutionary operators just keep recombining the same basic shapes. The system essentially gets stuck in a creative rut and quickly hits a local optimum.
+
+By using ramped half-and-half, you guarantee that generation zero is incredibly diverse before a single fitness evaluation even runs. It ensures you have a healthy mix of shallow, simple formulas which usually generalize much better alongside deep, complex formulas that can hunt down non-obvious patterns in the search space.
+
+---
+
+## MAP-Elites: Quality-Diversity Over Fitness-Only Selection
+
+Standard evolutionary algorithms rank populations purely by fitness. While this works for single-optimum problems, learning rate discovery is highly multimodal. A periodic formula, a monotonic decay, and a warmup-then-decay curve can all achieve identical validation loss despite being structurally unrelated. Selecting by fitness alone destroys this structural diversity.
+
+To fix this, MAP-Elites (in `gp/map_elites.py`) maps individuals into a 2D grid of behavioral niches. Each cell holds just one elite individual: the top performer for that specific behavior. The archive uses a grid of 30 complexity bins by 20 center-of-mass bins, offering up to 600 unique niches.
+
+The two behavioral axes are tailored specifically for learning rate schedules:
+
+* **Tree Complexity (30 bins):** Tracks total AST node count. This axis separates compact formulas (like a 2-node `sin(t)`) from complex, multi-term schedules (like a 15-node polynomial warmup with cosine decay). Compact formulas often generalize better, while complex ones can exploit dataset-specific geometry.
+* **Center of Mass (20 bins):** Calculated as `Σ(t * LR(t)) / Σ(LR(t))`. This measures the curve's weighted temporal centroid over normalized time. A value near 0 concentrates learning early (warmup), while a value near 1 concentrates it late (cooldown). This isolates the schedule's timing profile from its mathematical form.
+
+Niche insertion is strictly competitive. A new formula only takes a cell if the cell is empty or if the new formula beats the incumbent's validation loss.
+
+For reproduction, parent selection samples uniformly from all occupied niches rather than weighting by fitness. Because a rare structural formula has the exact same chance of being selected as the global leader, the archive avoids being overrun by slight variations of a single dominant strategy.
+
+---
+
+## The Genetic Operators
+
+Every offspring pair is generated using one of three operators, with probabilities managed in `config/settings.py`:
+
+* **Subtree Crossover (50%):** Deep copies both parents, grabs a random node from each tree via `_get_all_nodes`, and swaps their entire subtrees in place. If either new tree crosses the `max_depth=7` limit, the operation aborts and returns the original parent unchanged. This acts as a hard ceiling to stop unbounded tree growth.
+* **Subtree Mutation (25%):** Deep copies a single parent, picks a random node, and swaps it out for a brand-new random subtree up to depth 4. This is crucial for injecting fresh structural novelty that crossover cannot create on its own.
+* **Hoist Mutation (25%):** Selects a random internal operator node and replaces it entirely with one of its own descendants. Because a subtree is replaced by a smaller piece of itself, the resulting tree is guaranteed to shrink. This serves as the primary anti-bloat mechanism, preventing formulas from continuously ballooning into complex but meaningless shapes.
+
+No matter which operator runs, it must call `_clear_all_caches()` on the new offspring before returning them. This step is vital for correctness because the system uses the `Node.fitness` attribute as a first-class cache. If a child inherits a stale fitness value from a parent, the evaluation loop will short-circuit and return wrong data. Clearing the cache ensures every fitness score accurately reflects the new formula.
+
+---
+
+## Fitness Evaluation: Real Training and Synthetic Simulation
+
+The fitness function in `gp/fitness.py` routes to one of two evaluation modes depending on the detected runtime environment.
+
+### Real GPU Training
+
+In GPU mode, each candidate formula is evaluated by training a `FastConvNet` probe model from scratch using the formula as the learning rate schedule. The probe model is a lightweight two-layer CNN:
  
-- **MD5 Hash Caching** (`_hash_cache`) enables O(1) identity checks across generations without deep equality traversal.
-- **Fitness Caching** (`fitness` attribute) prevents re-evaluating identical ASTs that reappear via crossover.
-- **`to_prefix()`** serializes the tree as a space-separated prefix string consumed by the Rust evaluator.
-- **`invalidate_cache()`** recursively clears both the hash and fitness caches after any genetic operator modifies a subtree.
+```
+Input
+  Conv2d(in_channels, 32) + BatchNorm + ReLU + MaxPool
+  Conv2d(32, 64) + BatchNorm + ReLU + MaxPool
+  AdaptiveAvgPool2d(4x4)
+  Linear(64*16, 128) + ReLU
+  Linear(128, 10)
+```
 
-#### 2.3 Operator Set & Protection (`gp/operators.py`)
+This architecture is intentionally small. The goal isn't to hit state-of-the-art accuracy, but to produce a clean fitness signal that reflects how well a learning rate schedule navigates the loss landscape. Going with a deeper model would just slow down training and inflate generation wall time without actually improving the quality of that signal. To wring out extra performance, `FastConvNet` is compiled via `torch.compile(mode="reduce-overhead")` on non-Windows platforms. This fuses small GPU kernels via Triton, cutting down the CPU overhead that usually dominates short training runs.
 
-Every operator in the GP primitive set includes a numerical guard against undefined mathematical behavior:
+Over in `models/probe.py`, the `ProbeTrainer` wraps the training loop in several safety guards tailored for GP workloads. Because arbitrary genetic formulas can output values that are NaN, infinite, negative, or astronomically large, the trainer validates the schedule at every single step. If it catches a bad value, it immediately halts and returns a fitness score of `inf`.
 
-| Operator | Protection |
-|----------|-----------|
-| `/` | Returns `1.0` if `\|denominator\| < 1e-6` |
-| `log` | Operates on `max(\|x\|, 1e-6)` |
-| `sqrt` | Operates on `\|x\|` |
-| `exp` | Clamps exponent to `[-100, 10]` |
-| `sin`, `cos`, `abs`, `+`, `-`, `*` | No protection needed |
+It keeps a close eye on the training loss too. If the loss passes the `explode_threshold` or turns non-finite, the run aborts with an `inf` score. There is also an early stopping mechanism with customizable `patience` and `min_delta` parameters to kill the run if validation loss plateaus, keeping you from wasting precious GPU cycles on formulas that fail to generalize.
 
-These protections are mirrored identically in the Rust core (`rust_core/src/lib.rs`), ensuring Python test evaluations and production Rust evaluations produce numerically identical results.
+Finally, when CUDA is available, the system enables Automatic Mixed Precision (AMP) using `torch.autocast` and `GradScaler`. This cuts the memory footprint roughly in half and doubles throughput for float16-compatible operations, which makes a massive difference when you are evaluating dozens of candidates at the exact same time inside a generation.
 
-#### 2.4 Rust-Accelerated Evaluation (`rust_core/src/lib.rs`, `gp/evaluator.py`)
+### Synthetic Simulation (Cloud Mode)
 
-The inner evaluation loop is the hottest code path in the system. Python AST traversal with NumPy incurs per-call overhead that becomes prohibitive at population sizes of 50–200 evaluated concurrently over 10+ generations.
+On Streamlit Cloud there is no GPU and no PyTorch. Rather than disabling evolution entirely, SymboLR implements a synthetic fitness function that simulates gradient descent on a 5-dimensional quadratic loss landscape:
 
-The Rust extension (`symbolr_rust`) is compiled via PyO3/Maturin and exposes a single function:
+```
+L(w) = 0.5 * sum(curvatures * (w - w*)^2)
+```
+
+This setup uses heterogeneous curvatures `[0.5, 1.0, 2.0, 4.0, 8.0]` to mimic the ill-conditioning typical of real neural network loss surfaces. Each step applies a noisy SGD update using the candidate schedule's learning rate at that specific time step. The final fitness score is a weighted combination of the final validation loss and the best loss seen during the entire trajectory. It also actively penalizes constant schedules that lack `t` dependence, as well as schedules that continuously increase over time.
+
+This approach creates incredibly realistic convergence dynamics. High-quality schedules drive final losses down into the `0.05-0.3` range, while overly aggressive schedules quickly diverge above `2.0`. Meanwhile, flat, constant schedules stagnate right around `1.5-2.0`. Ultimately, the fitness function creates a clear, meaningful differentiation between different schedule shapes, providing exactly the kind of signal MAP-Elites needs to make steady progress.
+
+### Parallel Evaluation
+
+The `ParallelEvaluator` in `gp/evaluator.py` wraps both evaluation modes in a `ThreadPoolExecutor`.
+
+For GPU mode, this thread pool lets you overlap CPU-side Rust evaluation, data loading, and GPU training across multiple concurrent candidates. For synthetic mode, it simply parallelizes the NumPy simulation across your CPU cores.
+
+The worker count is handled by `SymboLRConfig.resolve_workers()`, which enforces conservative VRAM caps to keep things stable. It limits execution to at most 1 concurrent worker for large GPU runs (epochs >= 5 or pop >= 100), at most 2 for medium runs, and at most 3 for small runs. These caps were determined empirically on an RTX 4070 with 8 GB VRAM to prevent out-of-memory crashes from simultaneous model instantiations.
+
+---
+
+## The Rust Evaluation Engine
+
+The inner fitness loop evaluates each formula over a 100-step time array to produce a learning rate schedule. In Python, this requires traversing the AST recursively and calling NumPy operations at every single node. For a 10-node formula evaluated over 100 time steps, you end up triggering 10 recursive Python calls, 10 NumPy ufunc dispatches, and 10 intermediate array allocations for just one evaluation. Scale that up to a population size of 100 over 50 generations, and you are looking at 500,000 formula evaluations, each bogged down by Python interpreter overhead. This extra baggage is massive compared to the actual numerical work being done.
+
+The Rust extension in `rust_core/src/lib.rs`, compiled via PyO3 and Maturin, completely eliminates this bottleneck. The Python side serializes the AST into a space-separated prefix string using `Node.to_prefix()`. For example, the tree `0.5 * (1 - t)` flattens into the string `"* 0.5 - 1.0 t"`. This serialization runs in O(n) time relative to the number of nodes and creates a flat string that crosses the Python-Rust boundary with zero memory copying.
+
+Once on the **Rust side**, `parse_prefix` consumes the token iterator and builds a native `Expr` enum:
 
 ```rust
-fn evaluate_fast(prefix_expr: &str, t_array: PyReadonlyArray1<f64>) -> PyResult<&PyArray1<f64>>
+enum Expr {
+    Var,
+    Const(f64),
+    Add(Box<Expr>, Box<Expr>),
+    Sub(Box<Expr>, Box<Expr>),
+    Mul(Box<Expr>, Box<Expr>),
+    Div(Box<Expr>, Box<Expr>),
+    Sin(Box<Expr>),
+    Cos(Box<Expr>),
+    Exp(Box<Expr>),
+    Log(Box<Expr>),
+    Sqrt(Box<Expr>),
+    Abs(Box<Expr>),
+}
 ```
 
-The Rust evaluator:
-1. Parses the prefix string into a native Rust `Expr` enum (a recursive algebraic data type mirroring the Python `Node`).
-2. Evaluates element-wise in a single tight loop over the time array, no intermediate array allocations.
-3. Applies the same numerical protections as the Python operators.
-4. Returns a `PyArray1<f64>` via zero-copy NumPy interop.
-The `ParallelEvaluator` wraps this in a `ThreadPoolExecutor`:
+This recursive enum is a direct structural mirror of the Python `Node` class. The `eval(&self, t: f64) -> f64` method matches on the variant and computes a single scalar result. The evaluation loop then loops over the time array and calls `eval` once per time step, writing the results directly into a pre-allocated `Array1<f64>` from the `ndarray` crate.
 
-```
-For each individual in the generation:
-  Thread N:
-    1. Call symbolr_rust.evaluate_fast(prefix, t_array)  → lr_schedule (numpy)
-    2. model_factory() → fresh FastConvNet on GPU
-    3. ProbeTrainer.evaluate_schedule(model, loaders, lr_schedule, epochs) → val_loss
-    4. Cache val_loss on tree.fitness
-```
- 
-The thread pool is sized conservatively (`_resolve_worker_budget`) to avoid GPU OOM:
- 
-```
-CUDA, epochs >= 5 or pop >= 100  → max 1 worker
-CUDA, epochs >= 3 or pop >= 60   → max 2 workers
-CUDA, otherwise                  → max 3 workers
-CPU                              → min(requested, 4, pop_size)
-```
+This design means there are absolutely no intermediate array allocations. The finished array is returned to Python as a `PyArray1<f64>` using PyO3's zero-copy NumPy interop, which safely hands Python a direct view of memory owned by Rust without duplicating any data.
 
-#### 2.5 MAP-Elites Archive (`gp/map_elites.py`)
+The numerical protections in the Rust evaluator perfectly mirror the ones in the Python operator registry. This alignment is strictly enforced: `test_rust_core.py` runs both evaluators on the exact same broken, pathological formulas (think taking the log of a negative number, dividing by near-zero, and triggering an overflowing exponent) and verifies the outputs with `np.testing.assert_allclose(atol=1e-7)`. If the safety logic drifts between the two implementations, this test fails immediately. This parity guarantee ensures the system never shuffles fitness rankings based on whether the Rust extension is active.
 
-MAP-Elites is the heart of the system. Instead of a single population, it maintains a 2D grid where each cell holds the single best individual in a behavioral niche.
- 
-**Behavioral Descriptors:**
- 
-- **Dimension 1 — Tree Complexity**: AST node count, binned into 30 buckets. Distinguishes compact formulas (`sin(t)`, 2 nodes) from complex multi-term expressions.
-- **Dimension 2 — Center of Mass**: Computed as `Σ(t · LR(t)) / Σ(LR(t))`, the weighted centroid of the learning rate curve over time. Binned into 20 buckets. A value near 0 means learning is concentrated early (warmup-style); near 1 means late-concentrated (cooldown-style).
-**Niche assignment:** Both descriptors are computed by the Rust evaluator on the same `t_array` used for fitness. This ensures descriptor computation is fast and consistent.
- 
-**Insertion rule:** A new individual replaces the niche occupant only if its validation loss is strictly lower. Archive size is bounded by `30 × 20 = 600` niches maximum.
- 
-**Parent sampling:** Parents are selected **uniformly at random** from all occupied niches not by fitness rank. This gives rare structural configurations equal reproductive probability, strongly preventing premature convergence.
+According to benchmarks on the dashboard's Rust Core page, this optimization delivers a massive performance boost. Throughput improvements over pure Python and NumPy range from roughly 10x for shallow formulas up to roughly 50x for deep, multi-operator expressions.
 
-#### 2.6 Genetic Operators (`gp/evolution.py`)
- 
-Three operators are applied probabilistically per offspring pair:
- 
-| Operator | Probability | Mechanism |
-|----------|-------------|-----------|
-| Subtree Crossover | 50% | Swap two random subtrees between parents, reject offspring exceeding `max_depth=7` |
-| Subtree Mutation | 25% | Replace a random node with a freshly generated random subtree |
-| Hoist Mutation | 25% | Replace a subtree with one of its own descendants, guaranteeing smaller offspring |
- 
-All operators deep-copy parents before modification and call `_clear_all_caches()` on offspring to prevent stale fitness values propagating into the new generation.
- 
-#### 2.7 Algebraic Simplification (`gp/simplify.py`)
- 
-After genetic operations, offspring are passed through **SymPy CAS** to prune algebraic bloat:
- 
-```
-Node AST → _node_to_sympy() → SymPy Expr
-         → sympy.nsimplify(tolerance=1e-4)
-         → sympy.simplify()
-         → _sympy_to_node() → pruned Node AST
-```
- 
-This collapses identities like `(t + 0) * 1` → `t`, `t / t` → `1`, and `t - t` → `0` before archive insertion. Trees exceeding 50 nodes are skipped (cost/benefit unfavorable). A strict fallback returns the original tree if SymPy encounters an unsupported structure, preventing GP loop crashes.
- 
-The simplification is applied **lazily** — only on candidates that would actually improve a niche — to avoid paying the SymPy cost for the majority of offspring that fail the competitive replacement test.
- 
-#### 2.8 Hybrid Memetic Optimization (`optimiser/hybrid.py`)
- 
-After evolution terminates, the top-k Hall of Fame formulas undergo **L-BFGS-B gradient descent** on their scalar constants:
- 
-```python
-# Extract all float terminal nodes from the AST
-constant_nodes = _get_constant_nodes(optimized_tree)
- 
-# scipy.optimize.minimize with bounds=(1e-6, 10.0)
-res = minimize(objective, initial_guess, method='L-BFGS-B', bounds=..., options={'maxiter': 15})
-```
- 
-The `objective` function injects SciPy-proposed values directly into the live AST nodes (by reference), clears the fitness cache, and calls the `ProbeTrainer` for a fresh evaluation. This hybrid GP + gradient approach combines GP's strength at structural search with gradient descent's precision at numeric refinement.
- 
-#### 2.9 Probe Model (`models/probe.py`)
- 
-The fitness function evaluates each formula by training a `FastConvNet`, a lightweight 2-layer CNN designed for rapid throughput on the RTX 4070:
- 
-```
-Input → Conv2d(32) + BN + ReLU + MaxPool
-      → Conv2d(64) + BN + ReLU + MaxPool
-      → AdaptiveAvgPool(4×4)
-      → FC(64×16 → 128) + ReLU
-      → FC(128 → 10)
-```
- 
-The `ProbeTrainer` wraps training with:
-- **AMP (Automatic Mixed Precision)** via `torch.autocast` and `GradScaler` — halves memory, roughly doubles throughput on CUDA.
-- **Early stopping** with configurable `patience` and `min_delta`.
-- **Explosion guard**: if loss exceeds `explode_threshold` or is non-finite, return `inf` immediately.
-- **LR guard**: if the GP-produced LR is NaN, Inf, ≤ 0, or > 10, return `inf` immediately.
-- `torch.compile(mode="reduce-overhead")` on non-Windows platforms for Triton kernel fusion.
-
-### End-to-End Data Flow
- 
-```
-User clicks "Start Evolution"
-        │
-        ▼
-start_evolution() → uuid run_id → _RUNS dict → _EXECUTOR.submit(_run_evolution_job)
-        │
-        ▼
-[Background Thread]
-FidelityManager.get_low_fidelity()     → VRAMDataLoader (MNIST 5% → GPU VRAM)
-ramped_half_and_half(pop_size)         → List[Node]
-ParallelEvaluator.evaluate_population()
-    ├── Thread 1: symbolr_rust.evaluate_fast(prefix, t_array) → lr_schedule
-    │             ProbeTrainer.evaluate_schedule(model, loaders, lr) → val_loss
-    ├── Thread 2: (same)
-    └── Thread N: (same)
-        │
-        ▼
-archive.try_add(simplify_tree(ind), fit)  ← lazy SymPy simplification
-        │
-        ▼
-[For each generation]
-archive.sample_parents(pop_size)          ← uniform niche sampling
-genetic operators (crossover/mutation)    → offspring
-evaluate_population(offspring)            → fitnesses
-try_add to archive (competitive replace)
-_publish_progress() → _RUNS[run_id]       ← throttled (≤1 publish/sec)
-        │
-        ▼
-[Post-evolution]
-hybrid_optimize_constants(hof_trees)      ← L-BFGS-B on float terminals
-        │
-        ▼
-[Streamlit Main Thread]
-sync_state() → _get_run_state() → st.session_state
-st.fragment(run_every=1.5s) renders live progress
-Page routing renders charts from session_state
-```
- 
 ---
 
-## 3. Data & Knowledge Base
+## VRAM-Resident Data Loading
+
+Standard PyTorch `DataLoader` pipelines move data from CPU RAM to GPU VRAM every batch via the PCIe bus. For the low-fidelity tier, which uses 5% of MNIST (around 3,000 samples), the entire dataset takes up only about 9 MB of GPU VRAM at float32 precision. The custom `VRAMDataLoader` in `data/fidelity.py` takes advantage of this by pushing the whole dataset to the GPU once during initialization. It then generates batches by indexing into those GPU tensors directly.
+
+The `FidelityManager._prepare_vram_split` pipeline applies stratified sampling at every stage using `sklearn.model_selection.train_test_split(stratify=targets)`. This ensures class balance is maintained through the subset slicing and the train/val split. The raw NumPy arrays are then stacked into contiguous tensors and transferred to the device via `.to(device, non_blocking=True)` in a single call at setup time. After this initial transfer, all batch operations are handled through pure GPU tensor slicing, removing PCIe traffic from the training loop.
+
+When iterating, `VRAMDataLoader.__iter__` generates batch indices using `torch.randperm` directly on the GPU for device-side shuffling, yielding `(x[batch_idx], y[batch_idx])` slices. This turns each training iteration into a pure GPU operation. It eliminates the data movement overhead that would otherwise choke performance when evaluating multiple concurrent candidates.
+
+Because index-based slicing can easily misalign data if handled incorrectly, a regression test named `test_prepare_vram_split_keeps_subset_images_and_labels_aligned` explicitly validates that image pixels and their labels stay perfectly paired after the subset operation.
+
+---
+
+## Algebraic Simplification via SymPy
+
+Genetic Programming is notorious for producing bloated formulas. Successive crossover and mutation operations easily accumulate redundant structures. For instance, `(t + 0) * 1` is mathematically identical to `t`, but it takes up three extra nodes in the tree and forces the Rust evaluator to do unnecessary work. More importantly, when a formula looks complex because of accumulated noise, it can steal a behavioral niche that a genuinely compact formula with the same behavior could use more effectively.
+
+To solve this, `gp/simplify.py` passes offspring through SymPy CAS before they are inserted into the archive. Here is how the pipeline works:
+
+1. `_node_to_sympy` converts the `Node` tree into a SymPy expression using structural recursion. It handles n-ary SymPy `Add` and `Mul` operations by explicitly flattening the binary tree structure via a left-fold.
+2. `sympy.nsimplify(tolerance=1e-4)` converts float constants into exact rationals or simple fractions. This step is crucial because it enables symbolic cancellation that standard `sympy.simplify` misses when dealing with imprecise floats.
+3. `sympy.simplify` steps in to apply the full suite of algebraic reduction rules.
+4. `_sympy_to_node` converts the simplified SymPy expression back into a standard `Node` tree. It handles SymPy's `Pow` forms, which represent division and roots as negative or fractional exponents, using explicit case matching.
+
+This simplification process runs lazily. It only triggers for candidates that actually qualify to beat an incumbent in the archive, rather than running on every single offspring. This avoids burning CPU cycles on a single-threaded SymPy step for candidates that fail the competitive replacement test anyway.
+
+Additionally, any tree larger than 50 nodes skips simplification entirely since the performance cost outweighs the benefit. The function also uses a fail-closed fallback: if SymPy runs into an unsupported structure, it simply returns the original, unsimplified tree so the GP loop can keep running without interruption.
+
+Simplification works hand-in-hand with hoist mutation. While hoist mutation forces structural downsizing by swapping a subtree with one of its own descendants, SymPy clears out semantic clutter using pure algebraic identities. Together, they keep the archive filled with compact, high-signal formulas instead of massive, noise-inflated expressions.
+
+---
+
+## Hybrid Memetic Optimization
+
+GP excels at structural search: finding the right arrangement of operators and the best topology for a formula. However, it struggles with numeric search. Once a structure is locked in, finding the precise constant values that minimize the fitness function is incredibly difficult for evolution alone. A formula like `C1 * exp(-C2 * t) + C3 * t` might have the perfect shape for a given dataset, but its GP-inherited constants (`C1=0.3, C2=0.7, C3=0.1`) are often far from optimal.
+
+To bridge this gap, the top 5 Hall of Fame formulas undergo L-BFGS-B gradient descent on their scalar constants via `optimiser/hybrid.py` after the main evolution loop terminates. The process works through a tightly integrated loop:
+
+1. `_get_constant_nodes` traverses each tree to collect all float terminal nodes by reference.
+2. The SciPy `minimize` objective function injects proposed constant values directly into the live `Node` objects.
+3. The system clears the fitness cache and calls the fitness function for a fresh evaluation.
+
+Bounds are strictly enforced at `[1e-6, 10.0]` to keep the optimizer within a physically meaningful learning rate range. With `maxiter=15`, this local refinement typically converges in under a second per formula, consistently improving the final fitness scores by a few percentage points without altering the underlying structural form.
+
+This hybrid approach combines the complementary strengths of evolutionary and gradient-based optimization: GP handles the global structural search across the discrete space of mathematical expressions, while L-BFGS-B takes care of the local numeric refinement within the continuous space of constant values.
+
+---
+
+## Baseline Comparison Pipeline
+
+A core claim of SymboLR is that evolved schedules can compete directly with hand-crafted ones. Proving this requires a strict apples-to-apples comparison, meaning the exact same fitness function must evaluate both discovered and baseline schedules.
+
+To handle this, `baselines/schedules.py` implements seven standard schedules as pure NumPy functions over normalized time `t ∈ [0, 1]`: Cosine Annealing, Step Decay, Warm Restarts (SGDR), Linear Decay, Constant LR, 1-Cycle, and Exponential Decay. Each schedule accepts a time array and returns a learning rate array, matching the precise interface expected by the fitness pipeline.
+
+The evaluation runner in `optimiser/compare.py` pushes all seven baselines through `gp.fitness.evaluate_synthetic` (or the real GPU trainer in local mode), caches the results for the session, and structures the final comparison data for the dashboard's Results page.
+
+As a result, the baseline comparison chart in the UI displays real, live-computed losses rather than static reference values. When you run even a short 5-generation evolution, the dashboard plots the evolved elite's actual validation loss right alongside all seven baselines evaluated under the exact same conditions.
+
+---
+
+## Cloud Deployment and the Synthetic Fitness Bridge
+
+Streamlit Cloud enforces strict RAM limits and lacks GPU access entirely. The system manages this constraint through a three-way runtime detection mechanism inside `config/settings.py`:
+
+* **`RuntimeMode.CLOUD_CPU`** activates when `import torch` fails completely. Because the Rust extension requires compilation with Maturin (which is omitted from the cloud requirements file), formula evaluation falls back to Python's native `Node.evaluate()`. Fitness evaluation swaps the real model for the synthetic quadratic loss landscape. The Streamlit dashboard displays a "Cloud Mode" warning banner in the sidebar, and evolution parameters are automatically capped at 20 generations and a population size of 100 to prevent out-of-memory crashes.
+* **`RuntimeMode.LOCAL_CPU`** triggers when PyTorch is present but CUDA is missing. Formula evaluation automatically leverages the Rust extension if it was compiled locally, while fitness evaluation runs the real PyTorch training loop directly on the host CPU. While slower per candidate than GPU execution, this mode extracts a genuine training signal instead of a synthetic simulation.
+* **`RuntimeMode.LOCAL_GPU`** initializes when both PyTorch and CUDA are detected. This enables the complete production pipeline: Rust-backed AST evaluation, the custom `VRAMDataLoader`, AMP training, and `torch.compile`. This is the native environment the system was designed for, yielding the highest-quality fitness signals.
+
+The `SymboLRConfig` singleton instantiates once at import time and propagates this detected mode across the entire codebase. This isolates hardware-based branching entirely within the configuration module and the `_setup_evaluation_stack` function in `ui/state.py`, keeping the core evolution loop completely free of direct `torch.cuda.is_available()` runtime checks.
+
+To run the full GPU pipeline locally after cloning:
+
+```bash
+# Install GPU dependencies
+pip install -r requirements-gpu.txt
  
-### 3.1 Dataset Tiers
+# Build the Rust extension
+cd rust_core && maturin develop --release && cd ..
  
-SymboLR uses a **multi-fidelity evaluation strategy** to allocate compute efficiently:
+# Launch the dashboard (auto-detects GPU)
+streamlit run app.py
  
-| Tier | Dataset | Fraction | Samples | Use Case |
-|------|---------|----------|---------|----------|
-| Low | MNIST | 5% | ~3,000 | GP evolution, rapid candidate screening |
-| Medium | CIFAR-10 | 20% | ~10,000 | Refinement of shortlisted candidates |
-| High | CIFAR-10 | 100% | 50,000 | Final elite ranking |
- 
-In the current Streamlit-launched evolution, only the low-fidelity tier is active (sufficient for demonstrating discovered formulas and comparing against baselines).
- 
-### 3.2 Data Preprocessing & Stratification
- 
-All dataset splits use **stratified sampling** (`sklearn.model_selection.train_test_split` with `stratify=targets`) to preserve class balance at every fidelity level and train/val split.
- 
-The `FidelityManager._prepare_vram_split()` pipeline:
-1. Extracts raw numpy arrays from the torchvision dataset.
-2. Applies a stratified subset fraction.
-3. Applies a stratified 80/20 train/val split.
-4. Applies torchvision transforms per-sample.
-5. Stacks into contiguous tensors and `.to(device, non_blocking=True)` directly to GPU VRAM.
-A regression test (`test_prepare_vram_split_keeps_subset_images_and_labels_aligned`) explicitly validates that image pixels and labels remain correctly aligned after the subset operation — a subtle but critical correctness requirement.
- 
-### 3.3 VRAMDataLoader
- 
-The custom `VRAMDataLoader` eliminates PCIe CPU→GPU transfers entirely:
- 
-```python
-class VRAMDataLoader:
-    def __iter__(self):
-        indices = torch.randperm(self.n_samples, device=self.x.device)  # GPU-side shuffle
-        for start_idx in range(0, self.n_samples, self.batch_size):
-            batch_idx = indices[start_idx:end_idx]
-            yield self.x[batch_idx], self.y[batch_idx]  # pure VRAM slicing
+# Or run the CLI benchmark directly
+python benchmark.py --generations 10 --pop_size 30 --epochs 2 --workers 3 --seed 42
+
 ```
- 
-With a 3,000-sample MNIST subset at float32 (28×28×1), the total VRAM footprint is approximately 9 MB — trivial on an 8 GB RTX 4070. This makes batch iteration a pure kernel operation with no data movement overhead.
- 
-### 3.4 Knowledge Representation
- 
-There is no persistent vector store or embedding index. The system's "knowledge base" is the **MAP-Elites archive** itself which is a live, in-memory `Dict[Tuple[int,int], Tuple[float, Node]]` mapping behavioral niches to their best-known formula. This archive functions as a sparse quality-diversity map, encoding everything the system has discovered about the fitness landscape.
- 
-The archive snapshot is serialized to JSON-compatible dicts for Streamlit charting, capped at 500 points with stratified loss-based sampling to keep deepcopy costs bounded at large archive sizes.
- 
+
+## Empirical Results
+
+The table below reflects synthetic fitness landscape results in cloud mode. Running in GPU mode produces real MNIST or CIFAR-10 validation losses that vary by seed and generation count. These specific values represent a standard 10-generation, 50-population cloud run:
+
+| Schedule | Type | Synthetic Val Loss |
+| --- | --- | --- |
+| **SymboLR Elite** | **Discovered** | **~0.08 to 0.18** |
+| Cosine Annealing | Hand-crafted | ~0.21 |
+| 1-Cycle | Hand-crafted | ~0.23 |
+| Warm Restarts | Hand-crafted | ~0.27 |
+| Exponential Decay | Hand-crafted | ~0.31 |
+| Linear Decay | Hand-crafted | ~0.38 |
+| Step Decay | Hand-crafted | ~0.41 |
+| Constant LR | Hand-crafted | ~0.82 |
+
+A few consistent patterns show up across multiple runs:
+
+* **Early Concentration:** Formulas with a center of mass below 0.5 (concentrating the learning signal early on) consistently dominate the high-performing archive niches.
+* **Emergent Periodicity:** Periodic `sin` and `cos` formulas reliably emerge as functional equivalents to warm restart schedules. They arise purely from the fitness signal without any human priors forcing periodicity.
+* **Simplicity Wins:** The best-performing discovered formulas rarely exceed 7 to 9 AST nodes. This strong correlation between compactness and performance aligns with the theoretical expectation that simpler formulas generalize better across the heterogeneous curvatures of the quadratic landscape.
+* **Dead Ends:** Formulas with no `t` dependence cluster in the worst-performing niches without exception.
+
 ---
 
-## 4. Key Features & Innovations
- 
-### 4.1 Rust/Python Hybrid Evaluation
- 
-The PyO3-compiled `symbolr_rust.evaluate_fast` function is the most performance-critical innovation. The Rust `Expr` enum is a recursive algebraic data type that:
- 
-- Parses prefix notation in O(n) with a single iterator pass.
-- Evaluates element-wise with scalar dispatch, no intermediate array allocations, no NumPy overhead.
-- Mirrors Python's numerical protections exactly, enabling test suites to validate parity with `np.testing.assert_allclose(atol=1e-7)`.
-The estimated throughput improvement over pure Python NumPy evaluation is 10–50× for complex expressions.
- 
-### 4.2 Quality-Diversity Archive
- 
-Standard GP uses fitness-proportional or tournament selection, which tends to converge on a small number of dominant individuals. MAP-Elites prevents this by maintaining diversity as a first-class objective. The behavioral descriptors (complexity + center of mass) are domain-specifically chosen: They capture the two most meaningful axes of learning rate schedule variation how complex the formula is and when it concentrates the learning signal.
- 
-### 4.3 Algebraic Bloat Control
- 
-GP bloat (unbounded tree growth without fitness improvement) is a known failure mode that wastes archive slots and slows Rust evaluation. SymboLR addresses this at two levels:
- 
-- **Hoist mutation** (25% probability): structurally guaranteed to reduce tree size.
-- **SymPy simplification**: algebraically reduces trees to their canonical minimal form before archive insertion.
-- **Size cap**: trees exceeding 50 nodes skip SymPy (cost/benefit unfavorable) and are handled by the hoist pressure instead.
-### 4.4 Protected Operator Set
- 
-All 10 operators include numerical guards against division-by-zero, log of zero, sqrt of negative, and exponential overflow. These protections are deliberately conservative designed to keep learning rates in a plausible range `[1e-6, 10]` without silently corrupting the fitness signal. The Rust implementation mirrors these protections exactly, ensuring that the test suite's Python-vs-Rust parity check is a meaningful correctness guarantee.
- 
-### 4.5 VRAM-Resident Data Loading
- 
-The `VRAMDataLoader` eliminates PCIe transfers entirely by keeping the entire low-fidelity dataset resident in GPU VRAM. At the low-fidelity tier (~3,000 MNIST samples), this is practical with 8 GB VRAM. The benefit is most pronounced at high worker counts, where multiple threads would otherwise saturate the PCIe bus with competing data transfers.
- 
-### 4.6 AMP + torch.compile
- 
-The `ProbeTrainer` uses:
-- `torch.autocast` + `GradScaler` for FP16 mixed precision, approximately doubling throughput and halving memory relative to FP32.
-- `torch.compile(mode="reduce-overhead")` on Linux/macOS, which fuses small GPU kernels via Triton and minimizes CPU overhead — particularly valuable for the small batches and rapid model instantiations characteristic of GP evaluation.
-### 4.7 Fitness Caching with Hash-Based Identity
- 
-Each `Node` computes an MD5 hash from its structural content recursively. Identical subtrees across different generations produce identical hashes, enabling O(1) cache lookups that short-circuit the Rust → GPU pipeline entirely. This is particularly valuable after hoist mutations and SymPy simplifications, which frequently produce structurally equivalent formulas from different parent combinations.
- 
-### 4.8 Progress Publishing with Throttling
- 
-The background thread publishes progress to `_RUNS` at most once per second (`_PUBLISH_THROTTLE_S = 1.0`) for heavy fields (archive snapshot, LR curves), while lightweight fields (gen_log, progress ratios) are updated every callback. This prevents the background thread from blocking on expensive `deepcopy` operations of large archives at high population sizes.
- 
-### 4.9 Test Suite Depth
- 
-The project includes 11 test modules across unit and integration tiers:
- 
-| Module | What It Tests |
-|--------|--------------|
-| `test_gp_core.py` | Operator protections, tree evaluation, hashing, metrics |
-| `test_evolution.py` | All GP operators, fitness cache clearing, tournament selection |
-| `test_map_elites.py` | Behavioral descriptors, niche competition, parent sampling |
-| `test_evaluator.py` | Fitness caching, parallel evaluation, OOM handling, progress callbacks |
-| `test_fidelity.py` | VRAM loader drop_last, shuffling, stratification alignment |
-| `test_loader.py` | Stratified splits, seed reproducibility, pinned memory |
-| `test_hybrid.py` | Constant extraction, L-BFGS-B convergence, bounds clipping |
-| `test_simplify.py` | Algebraic identity removal, cancellation, fallback safety |
-| `test_probe.py` | FastConvNet shapes, NaN LR handling, early stopping, explosion guard |
-| `test_rust_core.py` | Prefix serialization, Rust/Python numerical parity |
-| `test_state.py` | Worker budget resolution logic |
- 
-Integration tests cover the full Streamlit app boot and the complete benchmark pipeline with mocked GPU dependencies.
- 
----
+## Testing
 
-## 5. Strengths, Limitations & Improvements
- 
-### 5.1 Current Strengths
- 
-- **End-to-end correctness**: Rust/Python parity is validated at `1e-7` tolerance in `test_rust_core.py`. The test suite catches regressions across the entire stack.
-- **Performance-aware design**: Every hot path like formula evaluation, data loading, model training etc has been explicitly optimized for the target hardware (RTX 4070, Ryzen 9).
-- **Human-readable outputs**: SymPy LaTeX rendering of discovered formulas makes results interpretable to practitioners, not just ML researchers.
-- **Robust evolution loop**: The system handles the full range of GP failure modes (bloat, constant collapse, numeric instability) without crashing.
-- **Live observability**: The Streamlit dashboard gives genuine real-time insight into archive growth and convergence, not just a post-hoc report.
-### 5.2 Limitations & Bottlenecks
- 
-#### UI Freezes Under High Configuration Load
- 
-**This is the most user-facing limitation**: when users set high generation counts (≥ 10), large population sizes (≥ 100), and multiple epochs (≥ 3) simultaneously, the Streamlit dashboard can become unresponsive. The root causes are:
- 
-1. **Archive deepcopy cost**: `_build_archive_snapshot()` deepcopies up to 500 archive entries. At large archive sizes, this can block the background thread for hundreds of milliseconds per publish cycle, creating visible stutter.
-2. **SymPy bottleneck**: SymPy simplification is CPU-bound and single-threaded. At pop_size=200, simplifying 100 offspring per generation can take several seconds of wall time, during which no progress is published.
-3. **Streamlit fragment rerun**: `st.fragment(run_every=1.5)` triggers a full fragment rerun every 1.5 seconds. If the background thread is blocked on SymPy or deepcopy, the UI renders stale state but still incurs rerun overhead.
-4. **ThreadPoolExecutor saturation**: At pop_size=200 with workers=4, the thread pool queues 200 evaluation tasks. Early completions increment progress correctly, but the remaining long-tail evaluations stall the gen_log publish.
-The `_PUBLISH_THROTTLE_S = 1.0` and archive size cap of 500 points partially mitigate this, but the fundamental issue is that SymPy simplification and archive snapshot construction are synchronous and CPU-bound in the background thread.
- 
-#### Other Limitations
- 
-- **Single-fidelity in practice**: The medium and high-fidelity tiers (`FidelityManager.get_medium_fidelity`, `get_high_fidelity`) are implemented but not wired into the evolution loop or the UI. The current system evaluates all candidates on the same low-fidelity MNIST tier regardless of their archive rank.
-- **No baseline schedule evaluation**: `baselines/schedules.py` and `optimiser/compare.py` are empty stubs. The baseline comparison chart in `ui/charts.py` uses hardcoded illustrative values (`BASELINE_DATA`) rather than results computed by actually running the baseline schedules on the same probe task.
-- **pyo3 version pin**: The Rust core is pinned to `pyo3 = 0.20.0`, which does not support Python 3.13+ natively. Upgrading to pyo3 0.22+ would require API changes in the macro usage.
-- **No persistent run history**: `_RUNS` is an in-memory dict that is evicted after 4 terminal runs. A completed evolution is lost on Streamlit server restart.
-- **SymPy on every offspring**: Despite the lazy insertion check, the current `_run_evolution_job` calls `simplify_tree` inside the niche improvement check loop, which processes every offspring that would improve a niche, not strictly every offspring, but at high archive occupancy this can still be a significant fraction.
-- **No surrogate model**: Every candidate requires a real GPU training run for fitness evaluation. At pop_size=100 and 10 generations, this is 1,000+ training runs. A neural surrogate (LSTM or GNN) on the archive could pre-screen candidates before GPU evaluation, reducing wall time by an order of magnitude.
-### 5.3 Concrete Improvement Suggestions
- 
-**Short-term (correctness & stability):**
- 
-1. **Implement `baselines/schedules.py`** — Add actual implementations of CosineAnnealing, StepDecay, WarmRestarts, LinearDecay as `Node`-compatible schedule generators, and wire them through `ParallelEvaluator` to produce real baseline numbers for the comparison chart.
-2. **Wire multi-fidelity cascade** — After each GP generation, promote the top-5 archive elites to medium-fidelity evaluation. Demote individuals whose medium-fidelity loss diverges from their low-fidelity estimate by more than a threshold. This concentrates compute on genuinely promising formulas.
-3. **Move SymPy to a process pool** — Replace `ThreadPoolExecutor` for simplification with `ProcessPoolExecutor` to avoid the GIL and parallelize SymPy's CPU-bound CAS work across cores.
-4. **Persist run history to SQLite** — Store completed `_RUNS` entries (gen_log, hof, archive_snapshot as JSON) to a local SQLite file. This enables resumable runs and cross-session comparison.
-**Medium-term (performance & scale):**
- 
-5. **Neural surrogate pre-screening** — Train a lightweight GNN on (AST structure → predicted val_loss) using the growing archive as training data. Use it to reject the bottom 50% of offspring before GPU evaluation. This halves the evaluation budget per generation after an initial warm-up period.
-6. **Async Streamlit architecture** — Replace `st.fragment(run_every=1.5)` with `st.write_stream` or WebSocket-based push updates to eliminate polling overhead and make the UI feel more responsive during long runs.
-7. **Operator probability adaptation** — Track per-operator offspring fitness improvements over a sliding window of generations. Reweight crossover/mutation/hoist probabilities adaptively toward whichever operator is currently producing the most archive improvements.
-8. **PyO3 upgrade to 0.22+** — Unlock Python 3.13 compatibility and the new `#[pyclass]` features that would allow exporting the Rust `Expr` type directly to Python for inspection and debugging.
-**Long-term (research impact):**
- 
-9. **Transfer evaluation** — After discovering elite schedules on MNIST/CIFAR-10 CNNs, evaluate them on a transformer fine-tuning task (e.g., DistilBERT on SST-2) to test cross-architecture generalization. This would be a significant research result.
-10. **MLflow experiment tracking** — Log hyperparameters, gen_log, and final Hall of Fame to MLflow for systematic reproducibility analysis across seeds and hardware configurations.
-11. **Grammar-guided GP** — Constrain the tree grammar to prevent degenerate structures (e.g., constant-only formulas, pure cosine with no `t` dependence) before evaluation, rather than discovering they are unfit through wasted GPU compute.
----
+The test suite spans 11 unit modules and 2 integration tests, all designed to run entirely on the CPU without requiring a GPU:
 
+| Module | Coverage |
+| --- | --- |
+| `test_gp_core.py` | Protected operator numerics, tree evaluation, MD5 hash determinism, and depth/size metrics |
+| `test_evolution.py` | All three genetic operators, fitness cache clearing, and parent integrity post-crossover |
+| `test_map_elites.py` | Behavioral descriptor math, niche competitive replacement, and uniform parent sampling |
+| `test_evaluator.py` | Fitness caching, parallel evaluation ordering, Rust crash handling, and progress callbacks |
+| `test_fidelity.py` | `VRAMDataLoader` drop_last logic, GPU-side shuffling, and stratification pixel/label alignment |
+| `test_loader.py` | Stratified data splits, seed reproducibility, pinned memory, and subset fraction accuracy |
+| `test_hybrid.py` | Constant node extraction, L-BFGS-B convergence on synthetic objectives, and bound enforcement |
+| `test_simplify.py` | Algebraic identity removal, structural self-cancellation, SymPy `Pow` handling, and fail-closed fallbacks |
+| `test_probe.py` | `FastConvNet` forward shapes, NaN learning rate guards, explosion early exits, and patience-based stopping |
+| `test_rust_core.py` | Prefix serialization correctness and Rust/Python numerical parity down to a `1e-7` tolerance |
+| `test_state.py` | Worker budget resolution logic across varying GPU and CPU runtime modes |
+
+```bash
+pytest tests/unit/ -v
+pytest tests/integration/ -v
+pytest --cov=. --cov-report=term-missing
+```
