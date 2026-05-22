@@ -87,7 +87,7 @@ def _get_device() -> Any:
     return _cached_device
 
 
-@dataclass(frozen=True)
+@dataclass
 class SymboLRConfig:
     """Immutable configuration snapshot."""
 
@@ -162,6 +162,51 @@ class SymboLRConfig:
     synth_n_dims: int = 5                  # parameter dimensions in synthetic landscape
     synth_n_evaluations: int = 3           # ensemble evaluations for noise reduction
 
+    # -----------------------------------------------------------------------
+    # Phase 3: Novelty Search
+    # -----------------------------------------------------------------------
+    novelty_enabled: bool = True
+    novelty_weight: float = 0.10            # base augmentation weight [0.05, 0.25]
+    novelty_max_weight: float = 0.25        # hard cap on novelty weight
+    novelty_k_neighbours: int = 5
+    novelty_archive_size: int = 500
+
+    # -----------------------------------------------------------------------
+    # Phase 3: Diversity Tracking
+    # -----------------------------------------------------------------------
+    diversity_tracking_enabled: bool = True
+    diversity_sample_size: int = 50         # sample size for behavioral diversity (avoids O(n^2))
+    diversity_collapse_threshold: float = 0.30
+    semantic_dedup_enabled: bool = True
+    semantic_dedup_threshold: float = 0.02  # min fingerprint distance to count as novel
+
+    # -----------------------------------------------------------------------
+    # Phase 3: Operator Controller
+    # -----------------------------------------------------------------------
+    operator_controller_enabled: bool = True
+    operator_controller_min_prob: float = 0.05   # floor probability per operator
+    operator_controller_ema_alpha: float = 0.30  # EMA smoothing factor
+
+    # -----------------------------------------------------------------------
+    # Phase 3: Meta-Controller
+    # -----------------------------------------------------------------------
+    meta_controller_enabled: bool = True
+    # stagnation_threshold (already defined above) is reused by meta-controller
+
+    # -----------------------------------------------------------------------
+    # Phase 3: Diagnostics
+    # -----------------------------------------------------------------------
+    diagnostics_enabled: bool = True
+    diagnostics_export_path: str = "./results"
+
+    # -----------------------------------------------------------------------
+    # Phase 3: Surrogate
+    # -----------------------------------------------------------------------
+    surrogate_enabled: bool = True
+    surrogate_min_samples: int = 50         # real evaluations before surrogate activates
+    surrogate_eval_fraction: float = 0.70   # fraction to evaluate (filter top 30%)
+    surrogate_buffer_size: int = 200        # rolling training buffer size
+
     @property
     def is_cloud(self) -> bool:
         return self.mode == RuntimeMode.CLOUD_CPU
@@ -193,6 +238,24 @@ class SymboLRConfig:
         else:
             safe_cap = 3
         return min(requested, safe_cap, pop_size)
+
+    def update(self, **kwargs) -> None:
+        """Update config values dynamically (e.g. from CLI overrides)."""
+        for k, v in kwargs.items():
+            if hasattr(self, k) and v is not None:
+                setattr(self, k, v)
+
+    @classmethod
+    def load_yaml(cls, path: str) -> "SymboLRConfig":
+        """Load configuration from a YAML file."""
+        import yaml
+        with open(path, "r") as f:
+            data = yaml.safe_load(f)
+        
+        cfg = cls()
+        if data:
+            cfg.update(**data)
+        return cfg
 
 
 # Singleton

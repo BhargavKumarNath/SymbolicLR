@@ -35,3 +35,6 @@ graphify-out/
 htmlcov/
 .coverage
 .gitignore
+results/
+fonts/
+symbolr.egg-info/

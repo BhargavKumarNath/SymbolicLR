@@ -282,6 +282,34 @@ Additionally, any tree larger than 50 nodes skips simplification entirely since 
 
 Simplification works hand-in-hand with hoist mutation. While hoist mutation forces structural downsizing by swapping a subtree with one of its own descendants, SymPy clears out semantic clutter using pure algebraic identities. Together, they keep the archive filled with compact, high-signal formulas instead of massive, noise-inflated expressions.
 
+## The SymboLR CLI
+
+SymboLR provides a lightweight, research-grade orchestration CLI built with `Typer` and `Rich`.
+
+### `symbolr benchmark`
+Runs a single-seed MAP-Elites evolution pass.
+```bash
+symbolr benchmark --config configs/research.yaml --seed 1337
+```
+
+### `symbolr experiment`
+Runs a multi-seed statistical validation suite and exports aggregated metrics.
+```bash
+symbolr experiment --seeds 5 --generations 20 --output-dir ./results/paper_run
+```
+
+### `symbolr evolve`
+Interactive mode for manually disabling/enabling specific Phase 3 subsystems without editing YAML files.
+```bash
+symbolr evolve --no-surrogate --operator-controller --generations 15
+```
+
+### `symbolr diagnostics` & `symbolr replay`
+Loads the JSON output from a previous run and visualizes convergence, diversity metrics, and Hall of Fame schedules in the terminal. Add `--plot` to export static Matplotlib charts.
+```bash
+symbolr replay ./results/run_seed42.json --plot
+```
+
 ---
 
 ## Hybrid Memetic Optimization
@@ -322,21 +350,30 @@ Streamlit Cloud enforces strict RAM limits and lacks GPU access entirely. The sy
 
 The `SymboLRConfig` singleton instantiates once at import time and propagates this detected mode across the entire codebase. This isolates hardware-based branching entirely within the configuration module and the `_setup_evaluation_stack` function in `ui/state.py`, keeping the core evolution loop completely free of direct `torch.cuda.is_available()` runtime checks.
 
-To run the full GPU pipeline locally after cloning:
+## Installation & Quickstart
+
+SymboLR requires Python 3.9+.
 
 ```bash
-# Install GPU dependencies
-pip install -r requirements-gpu.txt
- 
-# Build the Rust extension
-cd rust_core && maturin develop --release && cd ..
- 
-# Launch the dashboard (auto-detects GPU)
-streamlit run app.py
- 
-# Or run the CLI benchmark directly
-python benchmark.py --generations 10 --pop_size 30 --epochs 2 --workers 3 --seed 42
+# Clone and install locally
+git clone https://github.com/yourusername/symbolr.git
+cd symbolr
+pip install -e .
+```
 
+This installs the `symbolr` CLI tool globally in your environment.
+
+### Run an Evolution Benchmark
+
+```bash
+symbolr benchmark --generations 30 --pop-size 100 --epochs 5 --seed 42
+```
+
+### Review Diagnostics
+
+```bash
+symbolr diagnostics ./results/run_seed42.json --plot
+symbolr replay ./results/run_seed42.json
 ```
 
 ## Empirical Results

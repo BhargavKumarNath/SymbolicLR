@@ -1,0 +1,21 @@
+# default.yaml - Baseline SymboLR Configuration
+
+# Evolution parameters
+default_generations: 10
+default_pop_size: 50
+default_epochs: 2
+default_workers: 4
+seed: 42
+
+# Phase 3 Subsystems
+novelty_enabled: true
+diversity_tracking_enabled: true
+operator_controller_enabled: true
+meta_controller_enabled: true
+diagnostics_enabled: true
+surrogate_enabled: true
+
+# Triage & Tensions
+surrogate_min_samples: 50
+surrogate_eval_fraction: 0.70
+stagnation_threshold: 5
