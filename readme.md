@@ -21,6 +21,41 @@ This is the symbolic regression framing. The schedule `η(t)` is not a fixed fun
 
 ---
 
+## The Discovery Pipeline: From Proxy to Production
+
+SymboLR is designed to function as an offline hyperparameter discovery engine that sits upstream of massive production training runs. It is built around a two-step "Proxy-to-Production" pipeline that extracts state-of-the-art learning rate schedules tailored to specific datasets and architectures.
+
+### 1. The Proxy Search Phase
+Instead of burning hundreds of GPU hours tuning schedules on a massive model (e.g., training a massive ResNet on 100% of ImageNet), you hook SymboLR up to a lightweight, miniature **proxy task** (e.g., a tiny `FastConvNet` on 5% of your dataset). Running overnight, SymboLR acts as a high-throughput discovery engine. It evolves, breeds, and evaluates tens of thousands of complex mathematical formulas using PyTorch AMP and Rust-accelerated AST evaluation. It explores the absolute bounds of the loss landscape to find the optimal schedule shape for your specific data distribution.
+
+### 2. The Production Deployment Phase
+Once the evolutionary search concludes, SymboLR outputs a finalized MAP-Elites Hall of Fame. You extract the #1 winning mathematical equation (e.g., `0.067 * cos(t)`) and drop it directly into your massive, full-scale training script. 
+
+Because the equation is perfectly scaled to use normalized training time (`t ∈ [0, 1]`), where `0.0` is the first batch and `1.0` is the final batch of the last epoch, deployment into a production PyTorch loop is trivial:
+
+```python
+import math
+
+# Extract the SOTA equation discovered by SymboLR
+def symbolr_schedule(current_step, total_steps):
+    t = current_step / total_steps
+    return 0.067 * math.cos(t)  # Discovered formula
+
+# Drop into a production training loop, entirely replacing StepLR or CosineAnnealing
+for current_step, batch in enumerate(train_loader):
+    # Calculate current learning rate dynamically
+    lr = symbolr_schedule(current_step, total_steps)
+    
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
+        
+    # ... execute forward/backward pass ...
+```
+
+By offloading schedule discovery to SymboLR's evolutionary engine on a proxy task, you can achieve better final convergence in your production models without having to manually guess learning rate decay milestones.
+
+---
+
 ## System Architecture
 
 The pipeline is sequential but the critical inner loop, fitness evaluation, is parallelized across threads. At a high level:
