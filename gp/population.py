@@ -1,4 +1,5 @@
 import random
+import math
 from typing import List, Optional, Dict
 from .tree import Node
 from .operators import OPERATORS, get_active_operators, Operator
@@ -14,8 +15,9 @@ def _random_terminal() -> Node:
     elif r < 0.5:
         return Node(random.choice(SEED_CONSTANTS))  # 20% chance of seed constant
     else:
-        # 50% ephemeral random constant in [0.01, 2.0]
-        val = round(random.uniform(0.01, 2.0), 4)
+        # 50% ephemeral random constant in [0.001, 0.5] log-uniform
+        # Log-uniform distribution makes finding small learning rates much easier
+        val = round(math.exp(random.uniform(math.log(0.001), math.log(0.5))), 5)
         return Node(val)
 
 def generate_tree(depth: int, max_depth: int, method: str = 'grow', operators: Optional[Dict[str, Operator]] = None) -> Node:

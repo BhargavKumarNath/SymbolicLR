@@ -53,15 +53,10 @@ def create_compiled_model(device: Any, in_channels: int = 1, init_seed: int = No
     
     if init_seed is not None:
         torch.manual_seed(init_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(init_seed)
         
     model = FastConvNet(in_channels=in_channels).to(device)
-    
-    if init_seed is not None:
-        for p in model.parameters():
-            if p.dim() > 1:
-                torch.nn.init.kaiming_normal_(p)
-            elif p.dim() == 1:
-                torch.nn.init.zeros_(p)
     
     # Attempt to compile the model to Triton kernels
     if hasattr(torch, "compile") and sys.platform != "win32":

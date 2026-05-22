@@ -150,8 +150,13 @@ def evaluate_fitness(
     cfg = get_config()
 
     if cfg.torch_available and trainer is not None and model_factory is not None:
+        # Generate a deterministic seed based on the schedule shape
+        schedule_hash = int(hashlib.md5(lr_schedule.tobytes()).hexdigest()[:8], 16)
+        base_seed = getattr(cfg, 'model_init_seeds', (42,))[0]
+        model_seed = (schedule_hash + base_seed) % (2**32 - 1)
+        
         # Real training evaluation
-        model = model_factory()
+        model = model_factory(init_seed=model_seed)
         loss = trainer.evaluate_schedule(
             model=model,
             train_loader=train_loader,
@@ -160,9 +165,20 @@ def evaluate_fitness(
             epochs=epochs,
         )
         
+        # Heavily penalize schedules that are essentially flat constants
+        # This forces the GP to discover truly dynamic curves!
+        lr_std = np.std(lr_schedule)
+        if lr_std < 1e-4:
+            loss += 0.5  # Constant penalty
+            
+        # Penalty for schedules that aggressively increase over time (unstable)
+        if lr_schedule[-1] > lr_schedule[0] * 1.5:
+            loss += 0.3
+            
         # Parsimony pressure for real evaluation too
-        parsimony = getattr(cfg, 'parsimony_coefficient', 0.005)
-        loss += parsimony * tree.size()
+        # Scale parsimony down heavily since cross-entropy loss is very small (~0.2)
+        # Use an infinitesimally small penalty so it only acts as a tie-breaker
+        loss += 1e-5 * tree.size()
     else:
         # Synthetic fitness evaluation
         loss = evaluate_synthetic(lr_schedule, tree_size=tree.size())

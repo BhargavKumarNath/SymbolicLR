@@ -71,7 +71,7 @@ def main():
     evaluator = ParallelEvaluator(trainer, train_loader, val_loader, epochs=args.epochs, time_steps=100)
     archive = MAPElitesArchive(size_bins=30, com_bins=20, time_steps=100)
     
-    model_factory = lambda: create_compiled_model(device, in_channels=1)
+    model_factory = lambda init_seed=None: create_compiled_model(device, in_channels=1, init_seed=init_seed)
 
     # 3. Initial Population (Generation 0)
     console.print("\n[bold magenta]Initializing Generation 0 (Ramped Half-and-Half)...[/bold magenta]")
@@ -88,6 +88,10 @@ def main():
 
     # 4. MAP-Elites Evolution Loop
     console.print("\n[bold cyan]Beginning MAP-Elites Evolution...[/bold cyan]")
+    
+    stagnation_epochs = 0
+    previous_best = float('inf')
+    
     for gen in range(1, args.generations + 1):
         start_time = time.time()
         
@@ -97,21 +101,38 @@ def main():
         if not parents:
             console.print("[yellow]Archive empty, falling back to population sampling[/yellow]")
             parents = population.copy()
+            
         cfg = get_config()
+        
+        # Dynamic mutation rates for stagnation recovery
+        crossover_rate = cfg.crossover_rate
+        mutation_rate = cfg.mutation_rate
+        hoist_rate = cfg.hoist_rate
+        point_mutation_rate = cfg.point_mutation_rate
+        
+        if stagnation_epochs >= cfg.stagnation_threshold:
+            console.print(f"  [yellow]Stagnation detected ({stagnation_epochs} gens). Boosting mutation and injecting immigrants...[/yellow]")
+            crossover_rate = max(0.1, crossover_rate - 0.2)
+            mutation_rate += cfg.stagnation_mutation_boost
+            # Inject random immigrants to force diversity
+            immigrant_count = int(args.pop_size * cfg.immigrant_fraction)
+            if len(parents) > immigrant_count:
+                parents = parents[:-immigrant_count] + ramped_half_and_half(immigrant_count, min_depth=1, max_depth=3)
+                
         offspring = []
         # Apply Genetic Operators
         while len(offspring) < args.pop_size:
             p1 = random.choice(parents)
             
             r = random.random()
-            if r < cfg.crossover_rate:
+            if r < crossover_rate:
                 p2 = random.choice(parents)
                 offspring.append(subtree_crossover(p1, p2, max_depth=cfg.max_tree_depth_limit))
-            elif r < cfg.crossover_rate + cfg.mutation_rate:
+            elif r < crossover_rate + mutation_rate:
                 offspring.append(subtree_mutation(p1, max_depth=cfg.max_tree_depth_limit))
-            elif r < cfg.crossover_rate + cfg.mutation_rate + cfg.hoist_rate:
+            elif r < crossover_rate + mutation_rate + hoist_rate:
                 offspring.append(hoist_mutation(p1))
-            elif r < cfg.crossover_rate + cfg.mutation_rate + cfg.hoist_rate + cfg.point_mutation_rate:
+            elif r < crossover_rate + mutation_rate + hoist_rate + point_mutation_rate:
                 from gp.evolution import point_mutation
                 offspring.append(point_mutation(p1))
             else:
@@ -135,6 +156,13 @@ def main():
         hof = archive.get_hall_of_fame(top_k=1)
         best_loss = hof[0][0] if hof else float('inf')
         archive_size = len(archive.archive)
+        
+        # Stagnation tracking
+        if best_loss < previous_best - 1e-4:
+            previous_best = best_loss
+            stagnation_epochs = 0
+        else:
+            stagnation_epochs += 1
 
         console.print(f"Gen {gen:02d}/{args.generations} | "
                       f"New Niches Found: [green]{additions}[/green] | "

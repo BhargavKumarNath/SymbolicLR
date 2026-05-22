@@ -74,7 +74,12 @@ def hybrid_optimize_constants(
         _clear_caches_recursively(optimized_tree)
         
         # 3. Evaluate using the provided callback (e.g., ProbeTrainer)
-        return fitness_fn(optimized_tree)
+        fit = fitness_fn(optimized_tree)
+        
+        # L-BFGS-B will crash with RuntimeWarning if we return Inf/NaN
+        if not np.isfinite(fit) or fit > 1000.0:
+            return 1000.0
+        return fit
 
     # Execute bounded gradient descent
     res = minimize(
