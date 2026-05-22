@@ -1,6 +1,2 @@
-"""
-config - Central configuration for SymboLR.
-"""
-from config.settings import get_config, SymboLRConfig, RuntimeMode
-
-__all__ = ["get_config", "SymboLRConfig", "RuntimeMode"]
+"""config - Central runtime configuration for SymboLR."""
+from config.settings import get_config, reset_config, SymboLRConfig, RuntimeMode, OperatorGroup

@@ -23,6 +23,7 @@ from data.fidelity import FidelityManager
 from models.probe import ProbeTrainer, create_compiled_model
 from gp.population import ramped_half_and_half, generate_tree
 from gp.evolution import subtree_crossover, subtree_mutation, hoist_mutation
+from config.settings import get_config
 from gp.evaluator import ParallelEvaluator
 from gp.map_elites import MAPElitesArchive
 from gp.simplify import simplify_tree, tree_to_latex
@@ -96,24 +97,29 @@ def main():
         if not parents:
             console.print("[yellow]Archive empty, falling back to population sampling[/yellow]")
             parents = population.copy()
-        offspring =[]
-        
+        cfg = get_config()
+        offspring = []
         # Apply Genetic Operators
-        for _ in range(args.pop_size // 2):
-            p1, p2 = random.choice(parents), random.choice(parents)
+        while len(offspring) < args.pop_size:
+            p1 = random.choice(parents)
             
-            # 50% Crossover, 25% Mutation, 25% Hoist (Anti-Bloat)
             r = random.random()
-            if r < 0.5:
-                o1, o2 = subtree_crossover(p1, p2)
-                offspring.extend([o1, o2])
-            elif r < 0.75:
-                offspring.extend([subtree_mutation(p1, 4), subtree_mutation(p2, 4)])
+            if r < cfg.crossover_rate:
+                p2 = random.choice(parents)
+                offspring.append(subtree_crossover(p1, p2, max_depth=cfg.max_tree_depth_limit))
+            elif r < cfg.crossover_rate + cfg.mutation_rate:
+                offspring.append(subtree_mutation(p1, max_depth=cfg.max_tree_depth_limit))
+            elif r < cfg.crossover_rate + cfg.mutation_rate + cfg.hoist_rate:
+                offspring.append(hoist_mutation(p1))
+            elif r < cfg.crossover_rate + cfg.mutation_rate + cfg.hoist_rate + cfg.point_mutation_rate:
+                from gp.evolution import point_mutation
+                offspring.append(point_mutation(p1))
             else:
-                offspring.extend([hoist_mutation(p1), hoist_mutation(p2)])
+                from gp.evolution import constant_perturbation
+                offspring.append(constant_perturbation(p1))
 
         # Simplify newly generated offspring
-        offspring =[simplify_tree(ind) for ind in offspring]
+        offspring = [simplify_tree(ind) for ind in offspring]
         
         # Evaluate concurrently
         fitnesses = evaluator.evaluate_population(offspring, model_factory, max_workers=args.workers)

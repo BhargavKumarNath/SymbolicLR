@@ -1,5 +1,6 @@
 import copy 
 import sympy
+import numpy as np
 from typing import Optional
 from gp.tree import Node
 
@@ -65,27 +66,26 @@ def _sympy_to_node(expr: sympy.Expr) -> Node:
         
     # SymPy converts Division and Roots into Powers
     if isinstance(expr, sympy.Pow):
-        base = _sympy_to_node(expr.base)
         exp = expr.exp
         
         if exp == -1:
-            return Node("/",[Node(1.0), base])
+            return Node("/",[Node(1.0), _sympy_to_node(expr.base)])
         if exp == 0.5:
-            return Node("sqrt", [base])
+            return Node("sqrt", [_sympy_to_node(expr.base)])
         if exp == -0.5:
-            return Node("/",[Node(1.0), Node("sqrt", [base])])
+            return Node("/",[Node(1.0), Node("sqrt", [_sympy_to_node(expr.base)])])
         if exp == 2:
-            return Node("*", [base, base])
+            return Node("*", [_sympy_to_node(expr.base), _sympy_to_node(expr.base)])
             
         # Generic fallback for Integer Powers
         if isinstance(exp, sympy.Integer) and exp > 2:
-            res = base
+            res = _sympy_to_node(expr.base)
             for _ in range(int(exp) - 1):
-                res = Node("*",[res, base])
+                res = Node("*",[res, _sympy_to_node(expr.base)])
             return res
             
         # Mathematical absolute fallback to prevent crashing on weird fractional powers
-        return Node("exp", [Node("*", [Node(float(exp)), Node("log", [base])])])
+        return Node("exp", [Node("*", [Node(float(exp)), Node("log", [_sympy_to_node(expr.base)])])])
         
     # Standard Math Functions
     if isinstance(expr, sympy.sin): return Node("sin",[_sympy_to_node(expr.args[0])])
@@ -97,6 +97,29 @@ def _sympy_to_node(expr: sympy.Expr) -> Node:
     raise ValueError(f"Unsupported SymPy expression encountered: {type(expr)}")
 
 
+def _contains_variable(node: Node) -> bool:
+    """Check if a subtree contains the variable 't'."""
+    if isinstance(node.value, str) and node.value == 't':
+        return True
+    return any(_contains_variable(c) for c in node.children)
+
+
+def _constant_fold(node: Node) -> Node:
+    """If a subtree contains no variable 't', evaluate it and replace with a constant."""
+    if not _contains_variable(node):
+        try:
+            t_dummy = np.array([0.5])  # doesn't matter since no 't'
+            val = float(node.evaluate(t_dummy)[0])
+            if np.isfinite(val):
+                return Node(round(val, 6))
+        except Exception:
+            pass
+    # Recurse into children
+    if node.children:
+        node.children = [_constant_fold(child) for child in node.children]
+    return node
+
+
 def simplify_tree(tree: Node) -> Node:
     """
     Public method to prune bloat from a SymboLR AST algebraically.
@@ -104,16 +127,21 @@ def simplify_tree(tree: Node) -> Node:
     it logs and returns the original tree to prevent GP loop crashes.
     """
     original = copy.deepcopy(tree)
-    if original.size() > 50:
+    # Phase 1: Constant folding (cheap, always do)
+    original = _constant_fold(original)
+    
+    # Phase 2: Algebraic simplification (expensive, skip large trees)
+    if original.size() > 30:
+        if hasattr(original, 'invalidate_cache'):
+            original.invalidate_cache()
         return original
+        
     try:
         # Translate to mathematical engine
         sp_expr = _node_to_sympy(original)
         
         # Perform extreme algebraic reduction
-        # Using nsimplify to handle messy GP floats
-        sp_expr_simplified = sympy.nsimplify(sp_expr, tolerance=1e-4)
-        sp_expr_simplified = sympy.simplify(sp_expr_simplified)
+        sp_expr_simplified = sympy.simplify(sp_expr)
         
         # Translate back to native format
         pruned_tree = _sympy_to_node(sp_expr_simplified)
@@ -130,11 +158,11 @@ def simplify_tree(tree: Node) -> Node:
         # Silently fail closed: return the unsimplified tree if SymPy creates unsupported structures
         return original
 
+
 def tree_to_latex(tree: Node) -> str:
     """Generates beautiful LaTeX for UI rendering."""
     try:
         expr = _node_to_sympy(tree)
-        expr = sympy.nsimplify(expr, tolerance=1e-4)
         return sympy.latex(sympy.simplify(expr))
     except Exception:
         return str(tree)

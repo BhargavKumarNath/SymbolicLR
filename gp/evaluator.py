@@ -8,7 +8,8 @@ Uses the unified rust_bridge for schedule computation.
 
 import concurrent.futures
 import numpy as np
-from typing import List, Callable, Optional, Any
+import warnings
+from typing import List, Callable, Optional, Any, Dict
 from gp.tree import Node
 from gp.fitness import evaluate_fitness
 from config.settings import get_config
@@ -33,10 +34,22 @@ class ParallelEvaluator:
         self.val_loader = val_loader
         self.epochs = epochs
         self.t_array = np.linspace(0.0, 1.0, time_steps, dtype=np.float64)
+        
+        self._fitness_cache: Dict[str, float] = {}  # structural hash -> fitness
+        self._cache_hits: int = 0
+        self._cache_misses: int = 0
 
     def evaluate_individual(self, tree: Node, model_factory: Optional[Callable] = None) -> float:
-        """Evaluates a single individual using the unified fitness function."""
-        return evaluate_fitness(
+        """Evaluates a single individual using the unified fitness function with caching."""
+        tree_hash = tree.get_hash()
+        if tree_hash in self._fitness_cache:
+            self._cache_hits += 1
+            cached = self._fitness_cache[tree_hash]
+            tree.fitness = cached
+            return cached
+            
+        self._cache_misses += 1
+        result = evaluate_fitness(
             tree=tree,
             t_array=self.t_array,
             trainer=self.trainer,
@@ -45,6 +58,8 @@ class ParallelEvaluator:
             val_loader=self.val_loader,
             epochs=self.epochs,
         )
+        self._fitness_cache[tree_hash] = result
+        return result
 
     def evaluate_population(
         self,
@@ -74,7 +89,8 @@ class ParallelEvaluator:
                 idx = future_to_idx[future]
                 try:
                     fitnesses[idx] = future.result()
-                except Exception:
+                except Exception as e:
+                    warnings.warn(f"Fitness evaluation failed for individual {idx}: {e}", RuntimeWarning)
                     fitnesses[idx] = float("inf")
                 finally:
                     completed += 1
@@ -82,3 +98,12 @@ class ParallelEvaluator:
                         progress_callback(completed, total)
 
         return fitnesses
+
+    def get_cache_stats(self) -> dict:
+        total = self._cache_hits + self._cache_misses
+        return {
+            'cache_size': len(self._fitness_cache),
+            'cache_hits': self._cache_hits,
+            'cache_misses': self._cache_misses,
+            'hit_rate': round(self._cache_hits / max(1, total), 3),
+        }

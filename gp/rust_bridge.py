@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 from typing import TYPE_CHECKING
+import warnings
 
 if TYPE_CHECKING:
     from gp.tree import Node
@@ -44,8 +45,8 @@ def evaluate_schedule(tree: "Node", t_array: np.ndarray) -> np.ndarray:
         result = np.nan_to_num(result, nan=1e-4, posinf=1.0, neginf=1e-7)
         result = np.clip(result, 1e-7, 10.0)
         return result
-    except Exception:
-        # Fail gracefully - return a safe constant schedule
+    except Exception as e:
+        warnings.warn(f"Schedule evaluation failed: {e}", RuntimeWarning, stacklevel=2)
         return np.full_like(t_array, 1e-3)
 
 
@@ -71,7 +72,8 @@ def evaluate_schedule_from_prefix(prefix: str, t_array: np.ndarray) -> np.ndarra
         result = np.nan_to_num(result, nan=1e-4, posinf=1.0, neginf=1e-7)
         result = np.clip(result, 1e-7, 10.0)
         return result
-    except Exception:
+    except Exception as e:
+        warnings.warn(f"Schedule prefix evaluation failed: {e}", RuntimeWarning, stacklevel=2)
         return np.full_like(t_array, 1e-3)
 
 

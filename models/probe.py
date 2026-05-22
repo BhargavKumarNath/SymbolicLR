@@ -41,7 +41,7 @@ class FastConvNet(nn.Module):
         return x
 
 
-def create_compiled_model(device: Any, in_channels: int = 1) -> Any:
+def create_compiled_model(device: Any, in_channels: int = 1, init_seed: int = None) -> Any:
     """
     Factory function to instantiate and fuse the model using PyTorch 2.0's compiler.
     Uses 'reduce-overhead' to minimize CPU overhead during small batched VRAM loading.
@@ -50,7 +50,18 @@ def create_compiled_model(device: Any, in_channels: int = 1) -> Any:
         return "MockModel"
 
     import sys
+    
+    if init_seed is not None:
+        torch.manual_seed(init_seed)
+        
     model = FastConvNet(in_channels=in_channels).to(device)
+    
+    if init_seed is not None:
+        for p in model.parameters():
+            if p.dim() > 1:
+                torch.nn.init.kaiming_normal_(p)
+            elif p.dim() == 1:
+                torch.nn.init.zeros_(p)
     
     # Attempt to compile the model to Triton kernels
     if hasattr(torch, "compile") and sys.platform != "win32":
@@ -90,34 +101,16 @@ class ProbeTrainer:
         epochs: int
     ) -> float:
         if not TORCH_AVAILABLE:
-            # Mock evaluation logic: 
-            # 1. Penalize non-finite schedules
+            # Mock evaluation logic
             if not np.all(np.isfinite(lr_schedule)) or np.any(lr_schedule < 1e-7) or np.any(lr_schedule > 10):
                 return float('inf')
-            
-            # 2. Simulate loss: 
-            # Lower loss if schedule has some "interesting" properties (e.g. variance, trend)
-            base = 2.5  # Random start
-            
-            # Prefer schedules that change (learning)
-            # Use larger coefficients to make progress visible (0.1 -> 5.0)
+            base = 2.5
             std = np.std(lr_schedule)
             trend = np.abs(lr_schedule[-1] - lr_schedule[0])
-            
-            # Heuristic: Prefer schedules that decay (trend > 0 and lr[0] > lr[-1])
             is_decay = 1.0 if lr_schedule[0] > lr_schedule[-1] else 0.0
-            
-            # Mock fitness function:
-            # - Favor variance (std)
-            # - Favor decay (trend + is_decay)
-            # - Favor moderate complexity (simulated by prefix length)
-            complexity = len(str(model)) # Just a dummy to vary by run if needed
-            # Use prefix length as a proxy for genetic variety
+            complexity = len(str(model))
             gene_variety = (len(str(lr_schedule)) % 100) / 1000.0
-            
             mock_loss = base - (std * 15.0) - (trend * 10.0) - (is_decay * 0.2) - gene_variety
-            
-            # Ensure it stays within realistic bounds [0.1, 3.5]
             return float(np.clip(mock_loss, 0.1, 3.5))
 
         optimizer = torch.optim.SGD(model.parameters(), lr=1e-3, momentum=0.9, weight_decay=1e-4)
@@ -128,6 +121,13 @@ class ProbeTrainer:
         stagnant_epochs = 0
         global_step = 0
         schedule_length = len(lr_schedule)
+        
+        # Map the schedule to actual training steps via interpolation
+        total_steps = len(train_loader) * epochs
+        if total_steps > 0 and total_steps != schedule_length:
+            step_indices = np.linspace(0, schedule_length - 1, total_steps)
+            lr_schedule = np.interp(step_indices, np.arange(schedule_length), lr_schedule)
+            schedule_length = total_steps
 
         for epoch in range(epochs):
             model.train()

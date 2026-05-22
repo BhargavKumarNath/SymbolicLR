@@ -16,6 +16,8 @@ class Node:
         self.value = value
         self.children = children if children is not None else []
         self._hash_cache: Optional[str] = None
+        self._depth_cache: Optional[int] = None
+        self._size_cache: Optional[int] = None
         self.fitness: Optional[float] = None
     
     def evaluate(self, t: np.ndarray) -> np.ndarray:
@@ -38,6 +40,8 @@ class Node:
                 return str(self.value)
             child_results = [child.evaluate(t) for child in self.children]
             result = op.func(*child_results)
+            # Catch overflow in intermediate expressions
+            result = np.clip(result, -1e6, 1e6)
             return np.nan_to_num(result, nan=1.0, posinf=1.0, neginf=1.0)
         
         # 3. Float Constant
@@ -71,19 +75,34 @@ class Node:
             raw = "|".join(parts)
             self._hash_cache = hashlib.md5(raw.encode()).hexdigest()
         return self._hash_cache
+        
+    def __eq__(self, other) -> bool:
+        if not isinstance(other, Node):
+            return False
+        return self.get_hash() == other.get_hash()
+        
+    def __hash__(self) -> int:
+        return int(self.get_hash()[:16], 16)
     
     def depth(self) -> int:
         """Returns the maximum depth of the tree (1-indexed)"""
-        if not self.children:
-            return 1
-        return 1 + max(child.depth() for child in self.children)
+        if self._depth_cache is None:
+            if not self.children:
+                self._depth_cache = 1
+            else:
+                self._depth_cache = 1 + max(child.depth() for child in self.children)
+        return self._depth_cache
     
     def size(self) -> int:
         """Returns the total number of nodes in the tree (bloat proxy)"""
-        return 1 + sum(child.size() for child in self.children)
+        if self._size_cache is None:
+            self._size_cache = 1 + sum(child.size() for child in self.children)
+        return self._size_cache
     
     def invalidate_cache(self):
         self._hash_cache = None
+        self._depth_cache = None
+        self._size_cache = None
         self.fitness = None
         for child in self.children:
             child.invalidate_cache()
@@ -94,9 +113,3 @@ class Node:
             return str(self.value)
         children_str = " ".join(child.to_prefix() for child in self.children)
         return f"{self.value} {children_str}"
-
-
-    
-
-
-    
