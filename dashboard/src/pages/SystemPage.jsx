@@ -1,108 +1,93 @@
 import React, { useState } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { Terminal, Server, Database, Cloud, LayoutTemplate, Settings2, BrainCircuit, Network, Cpu, ArrowRightLeft, Blocks } from 'lucide-react';
 import SectionHeader from '../components/SectionHeader';
 
 const SystemPage = () => {
     const [view, setView] = useState("infrastructure"); // "infrastructure" | "internals"
-    const [activeTooltip, setActiveTooltip] = useState(null);
+    const [activeNode, setActiveNode] = useState(null);
 
-    const handleHover = (id) => setActiveTooltip(id);
-    const handleLeave = () => setActiveTooltip(null);
+    const handleHover = (id) => setActiveNode(id);
+    const handleLeave = () => setActiveNode(null);
 
-    // Reusable diagram node
-    const DiagramNode = ({ id, label, color, x, y, width = 160, height = 60, icon }) => {
-        const isHovered = activeTooltip === id;
+    // Reusable Node Component
+    const Node = ({ id, label, icon: Icon, color, x, y, width = 200, height = 70, subcomponents = [] }) => {
+        const isHovered = activeNode === id;
         return (
-            <div
+            <motion.div
+                initial={{ opacity: 0, scale: 0.9 }}
+                animate={{ opacity: 1, scale: 1, y: isHovered ? -4 : 0 }}
+                exit={{ opacity: 0, scale: 0.9 }}
+                transition={{ duration: 0.4, type: "spring", bounce: 0.3 }}
                 onMouseEnter={() => handleHover(id)}
                 onMouseLeave={handleLeave}
                 style={{
-                    position: "absolute",
-                    left: x,
-                    top: y,
-                    width,
-                    height,
-                    background: `linear-gradient(180deg, rgba(255,255,255,0.05), rgba(0,0,0,0.5))`,
+                    position: "absolute", left: x, top: y, width, height,
+                    background: isHovered ? `linear-gradient(180deg, ${color}22, rgba(0,0,0,0.8))` : `linear-gradient(180deg, rgba(255,255,255,0.05), rgba(0,0,0,0.6))`,
                     border: `1px solid ${isHovered ? color : "var(--border)"}`,
-                    borderRadius: 12,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    gap: 10,
-                    cursor: "pointer",
-                    boxShadow: isHovered ? `0 0 20px ${color}44` : "none",
-                    transform: isHovered ? "translateY(-4px)" : "translateY(0)",
-                    transition: "all 0.3s cubic-bezier(0.16, 1, 0.3, 1)",
-                    zIndex: isHovered ? 10 : 2
+                    borderRadius: 12, cursor: "pointer", zIndex: isHovered ? 20 : 10,
+                    boxShadow: isHovered ? `0 0 30px ${color}33` : "none",
+                    display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center"
                 }}
             >
-                {icon && <span style={{ color, fontSize: 18 }}>{icon}</span>}
-                <span style={{ fontSize: 13, fontWeight: 600, color: isHovered ? "#fff" : "var(--text-2)" }}>
-                    {label}
-                </span>
-            </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <Icon color={isHovered ? color : "var(--text-3)"} size={22} />
+                    <span style={{ fontSize: 13, fontWeight: 600, color: isHovered ? "#fff" : "var(--text)" }}>{label}</span>
+                </div>
+                
+                <AnimatePresence>
+                    {isHovered && subcomponents.length > 0 && (
+                        <motion.div
+                            initial={{ opacity: 0, height: 0, marginTop: 0 }}
+                            animate={{ opacity: 1, height: "auto", marginTop: 12 }}
+                            exit={{ opacity: 0, height: 0, marginTop: 0 }}
+                            style={{ width: "100%", padding: "0 16px", display: "flex", flexDirection: "column", gap: 6, overflow: "hidden" }}
+                        >
+                            <div style={{ width: "100%", height: 1, background: `${color}44`, marginBottom: 6 }} />
+                            {subcomponents.map((sub, i) => (
+                                <div key={i} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                    <div style={{ width: 4, height: 4, borderRadius: "50%", background: color }} />
+                                    <span style={{ fontSize: 11, color: "var(--text-2)", fontFamily: "var(--mono)", whiteSpace: "nowrap" }}>{sub}</span>
+                                </div>
+                            ))}
+                        </motion.div>
+                    )}
+                </AnimatePresence>
+            </motion.div>
         );
     };
 
-    // Reusable connecting arrow (simplified SVG)
-    const Arrow = ({ startX, startY, endX, endY, active }) => {
-        const strokeColor = active ? "var(--text)" : "var(--border)";
-        const path = `M ${startX} ${startY} C ${startX + 50} ${startY}, ${endX - 50} ${endY}, ${endX} ${endY}`;
+    // Reusable Edge Component
+    const Edge = ({ startX, startY, endX, endY, label, color = "var(--border)", activeColor = "var(--blue)", isCyclical = false }) => {
+        const path = isCyclical 
+            ? `M ${startX} ${startY} C ${startX} ${startY + 60}, ${endX} ${endY + 60}, ${endX} ${endY}`
+            : `M ${startX} ${startY} C ${startX + 60} ${startY}, ${endX - 60} ${endY}, ${endX} ${endY}`;
+        
+        const midX = (startX + endX) / 2;
+        const midY = isCyclical ? Math.max(startY, endY) + 40 : (startY + endY) / 2;
+
         return (
-            <svg style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", zIndex: 1 }}>
-                <path d={path} fill="none" stroke={strokeColor} strokeWidth={2} strokeDasharray={active ? "4 4" : "none"} />
-                {active && (
-                    <circle r="4" fill="var(--text)">
-                        <animateMotion dur="2s" repeatCount="indefinite" path={path} />
-                    </circle>
+            <motion.svg 
+                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", zIndex: 1 }}
+            >
+                {/* Base track */}
+                <path d={path} fill="none" stroke="var(--border)" strokeWidth={2} />
+                {/* Animated dash */}
+                <path d={path} fill="none" stroke={activeColor} strokeWidth={2} strokeDasharray="6 8" strokeOpacity={0.6}>
+                    <animate attributeName="stroke-dashoffset" from="14" to="0" dur="0.8s" repeatCount="indefinite" />
+                </path>
+                {/* Label background */}
+                {label && (
+                    <g transform={`translate(${midX}, ${midY})`}>
+                        <rect x="-60" y="-12" width="120" height="24" rx="12" fill="var(--bg)" stroke="var(--border)" strokeWidth="1" />
+                        <text x="0" y="4" textAnchor="middle" fill="var(--text-3)" fontSize="10" fontFamily="var(--mono)" letterSpacing="0.05em">
+                            {label}
+                        </text>
+                    </g>
                 )}
-            </svg>
+            </motion.svg>
         );
-    };
-
-    // Tooltip data mapped to actual codebase files
-    const tooltips = {
-        "offline-compute": {
-            title: "Heavy Offline Compute",
-            file: "cli/main.py",
-            body: "The core hybrid engine (Python & Rust) runs entirely offline. It evaluates millions of learning rate schedules asynchronously using local GPUs, completely disconnected from the web dashboard.",
-            color: "var(--blue)"
-        },
-        "json-artifact": {
-            title: "Static JSON Artifact",
-            file: "run.json",
-            body: "Evolution telemetry, including the archive grids, Hall of Fame formulas, and diversity metrics, are serialized into a lightweight JSON file. This acts as the single source of truth.",
-            color: "var(--orange)"
-        },
-        "vercel-edge": {
-            title: "Vercel Edge Network",
-            file: "dashboard/src/main.jsx",
-            body: "The dashboard is statically built and deployed globally via Vercel. By fetching the static JSON artifact, it achieves zero-latency renders and zero backend maintenance.",
-            color: "var(--text)"
-        },
-        "meta-controller": {
-            title: "Python Meta-Controller",
-            file: "gp/meta_controller.py",
-            body: "A 3-phase rule-based state machine that dynamically adjusts mutation intensities and triggers exploration/diversification phases based on real-time stagnation metrics.",
-            color: "var(--purple)"
-        },
-        "map-elites": {
-            title: "MAP-Elites Archive",
-            file: "gp/map_elites.py",
-            body: "Maintains behavioral diversity. Solutions are binned by structural complexity and temporal center-of-mass. An incumbent is only replaced if a new formula achieves strictly lower validation loss.",
-            color: "var(--green)"
-        },
-        "pyo3-bridge": {
-            title: "PyO3 Interop Bridge",
-            file: "gp/rust_bridge.py",
-            body: "Serializes ASTs into prefix mathematical notation and bridges Python to Rust, bypassing standard Python recursive overhead while maintaining safety guarantees.",
-            color: "var(--teal)"
-        },
-        "rust-evaluator": {
-            title: "Rust Evaluator",
-            file: "rust_core/src/lib.rs",
-            body: "High-speed fitness benchmarking. Parses the prefix AST into native enums and performs zero-allocation scalar evaluation across the 100-step time array, returning a zero-copy NumPy view.",
-            color: "var(--red)"
-        }
     };
 
     return (
@@ -110,7 +95,7 @@ const SystemPage = () => {
             <SectionHeader
                 tag="Technical Deep Dive"
                 title="System Architecture"
-                subtitle="Explore the dual nature of SymboLR: the decoupling of the heavy optimization backend from the lightning-fast web dashboard."
+                subtitle="Explore the dual nature of SymboLR: the decoupling of the heavy optimization backend from the lightning-fast web presentation, and the inner workings of the algorithmic loop."
             />
 
             {/* View Toggle */}
@@ -122,101 +107,90 @@ const SystemPage = () => {
                     <button
                         onClick={() => setView("infrastructure")}
                         style={{
-                            padding: "10px 24px", borderRadius: 26, fontSize: 14, fontWeight: 600,
-                            background: view === "infrastructure" ? "rgba(255,255,255,0.1)" : "transparent",
+                            padding: "10px 24px", borderRadius: 26, fontSize: 13, fontWeight: 600,
+                            background: view === "infrastructure" ? "var(--blue)" : "transparent",
                             color: view === "infrastructure" ? "#fff" : "var(--text-3)",
                             border: "none", cursor: "pointer", transition: "all 0.2s"
                         }}
                     >
-                        View A: Infrastructure
+                        View A: Infrastructure Pipeline
                     </button>
                     <button
                         onClick={() => setView("internals")}
                         style={{
-                            padding: "10px 24px", borderRadius: 26, fontSize: 14, fontWeight: 600,
-                            background: view === "internals" ? "rgba(255,255,255,0.1)" : "transparent",
+                            padding: "10px 24px", borderRadius: 26, fontSize: 13, fontWeight: 600,
+                            background: view === "internals" ? "var(--purple)" : "transparent",
                             color: view === "internals" ? "#fff" : "var(--text-3)",
                             border: "none", cursor: "pointer", transition: "all 0.2s"
                         }}
                     >
-                        View B: Engine Internals
+                        View B: Algorithmic Core
                     </button>
                 </div>
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 320px", gap: 40, alignItems: "start" }}>
-                
-                {/* Interactive Diagram Area */}
-                <div className="glass" style={{ 
-                    height: 500, position: "relative", overflow: "hidden", 
-                    background: "radial-gradient(circle at center, rgba(255,255,255,0.03) 0%, transparent 70%)" 
-                }}>
-                    {/* View A: Infrastructure */}
+            {/* Interactive Graph Canvas */}
+            <div className="glass" style={{ 
+                height: 600, position: "relative", overflow: "hidden", 
+                background: "radial-gradient(circle at center, rgba(255,255,255,0.02) 0%, transparent 80%)" 
+            }}>
+                <AnimatePresence mode="wait">
+                    {/* VIEW A: INFRASTRUCTURE */}
                     {view === "infrastructure" && (
-                        <div style={{ width: "100%", height: "100%", position: "absolute", animation: "fadeUp 0.4s ease both" }}>
-                            <DiagramNode id="offline-compute" label="Heavy Offline Compute" icon="⚙" color="var(--blue)" x={60} y={220} width={200} />
-                            <Arrow startX={260} startY={250} endX={400} endY={250} active={activeTooltip === "offline-compute"} />
+                        <motion.div key="infra" style={{ width: "100%", height: "100%", position: "absolute" }}>
+                            <Edge startX={260} startY={200} endX={380} endY={200} label="Offline Export" activeColor="var(--orange)" />
+                            <Edge startX={580} startY={200} endX={700} endY={200} label="Pre-computed JSON" activeColor="var(--blue)" />
+                            <Edge startX={800} startY={235} endX={800} endY={330} label="Edge Hydration" activeColor="var(--green)" />
                             
-                            <DiagramNode id="json-artifact" label="Static JSON Artifact" icon="📄" color="var(--orange)" x={400} y={220} />
-                            <Arrow startX={560} startY={250} endX={700} endY={250} active={activeTooltip === "json-artifact"} />
+                            <Node id="compute" label="Dedicated Compute Node" icon={Server} color="var(--orange)" x={60} y={165} width={200}
+                                subcomponents={["RTX 4070 / Ryzen 9", "Python Orchestrator", "Rust Evaluation Engine"]} />
                             
-                            <DiagramNode id="vercel-edge" label="Vercel Edge Network" icon="⚡" color="var(--text)" x={700} y={220} />
-                        </div>
+                            <Node id="artifact-gen" label="Artifact Generation" icon={Blocks} color="var(--orange)" x={380} y={165} width={200}
+                                subcomponents={["JSON Serialization", "Metric Aggregation", "LaTeX Formula Export"]} />
+
+                            <Node id="artifact-store" label="results/*.json Artifact" icon={Database} color="var(--blue)" x={700} y={165} width={200}
+                                subcomponents={["Immutable State", "Zero Latency Source", "Git LFS Managed"]} />
+
+                            <Node id="edge-pipeline" label="Static Edge Pipeline" icon={Cloud} color="var(--blue)" x={700} y={330} width={200}
+                                subcomponents={["Source Control Sync", "Vercel Edge Network", "Global CDN Caching"]} />
+
+                            <Node id="presentation" label="Client Presentation" icon={LayoutTemplate} color="var(--green)" x={380} y={330} width={200}
+                                subcomponents={["React/Vite Frontend", "Zero-latency State", "Interactive Visualization"]} />
+                            
+                            {/* Return arrow visually connecting Edge Pipeline to Client */}
+                            <Edge startX={700} startY={365} endX={580} endY={365} label="Hydrate" activeColor="var(--green)" />
+                        </motion.div>
                     )}
 
-                    {/* View B: Engine Internals */}
+                    {/* VIEW B: ALGORITHMIC CORE */}
                     {view === "internals" && (
-                        <div style={{ width: "100%", height: "100%", position: "absolute", animation: "fadeUp 0.4s ease both" }}>
-                            <DiagramNode id="meta-controller" label="Python Meta-Controller" icon="🧠" color="var(--purple)" x={60} y={100} width={200} />
-                            <Arrow startX={160} startY={160} endX={160} endY={240} active={activeTooltip === "meta-controller"} />
+                        <motion.div key="internals" style={{ width: "100%", height: "100%", position: "absolute" }}>
+                            {/* Forward Edges */}
+                            <Edge startX={320} startY={120} endX={250} endY={220} label="Configured Spec" activeColor="var(--purple)" />
+                            <Edge startX={150} startY={290} endX={150} endY={380} label="Hyperparameters" activeColor="var(--purple)" />
+                            <Edge startX={250} startY={415} endX={400} endY={415} label="Serialized ASTs" activeColor="var(--teal)" />
+                            <Edge startX={600} startY={415} endX={700} endY={415} label="Parallel Batches" activeColor="var(--red)" />
                             
-                            <DiagramNode id="map-elites" label="MAP-Elites Archive" icon="▦" color="var(--green)" x={60} y={240} width={200} />
-                            <Arrow startX={260} startY={270} endX={420} endY={270} active={activeTooltip === "map-elites"} />
-                            
-                            <DiagramNode id="pyo3-bridge" label="PyO3 Interop Bridge" icon="🌉" color="var(--teal)" x={420} y={240} width={180} />
-                            <Arrow startX={510} startY={240} endX={650} endY={140} active={activeTooltip === "pyo3-bridge"} />
-                            
-                            <DiagramNode id="rust-evaluator" label="Rust Evaluation Engine" icon="🦀" color="var(--red)" x={580} y={80} width={220} />
-                            
-                            {/* Feedback loop arrow */}
-                            <Arrow startX={690} startY={140} endX={260} endY={270} active={activeTooltip === "rust-evaluator"} />
-                        </div>
-                    )}
-                </div>
+                            {/* Feedback Loop Edge */}
+                            <Edge startX={800} startY={450} endX={150} endY={450} label="Fitness Scores & MSE" activeColor="var(--green)" isCyclical={true} />
 
-                {/* Dynamic Tooltip Panel */}
-                <div className="glass" style={{ padding: "32px", minHeight: 320, display: "flex", flexDirection: "column" }}>
-                    {activeTooltip && tooltips[activeTooltip] ? (
-                        <div style={{ animation: "fadeUp 0.2s ease both" }}>
-                            <div style={{ 
-                                display: "inline-flex", alignItems: "center", gap: 6,
-                                padding: "4px 10px", borderRadius: 6, marginBottom: 20,
-                                background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)",
-                                color: "var(--text-3)", fontSize: 11, fontFamily: "var(--mono)"
-                            }}>
-                                <span>📄</span> {tooltips[activeTooltip].file}
-                            </div>
-                            <h3 style={{ fontSize: 20, fontWeight: 700, color: tooltips[activeTooltip].color, marginBottom: 16 }}>
-                                {tooltips[activeTooltip].title}
-                            </h3>
-                            <p style={{ fontSize: 14, color: "var(--text-2)", lineHeight: 1.7 }}>
-                                {tooltips[activeTooltip].body}
-                            </p>
-                        </div>
-                    ) : (
-                        <div style={{ 
-                            flex: 1, display: "flex", flexDirection: "column", 
-                            alignItems: "center", justifyContent: "center", textAlign: "center" 
-                        }}>
-                            <div style={{ fontSize: 32, marginBottom: 16, opacity: 0.3 }}>👆</div>
-                            <h4 style={{ fontSize: 15, fontWeight: 600, color: "var(--text-3)", marginBottom: 8 }}>Explore the Code</h4>
-                            <p style={{ fontSize: 13, color: "var(--text-3)", opacity: 0.7 }}>
-                                Hover over any block in the diagram to reveal its architectural purpose and the exact file that implements it.
-                            </p>
-                        </div>
-                    )}
-                </div>
+                            <Node id="cli" label="CLI Orchestrator" icon={Terminal} color="var(--text)" x={320} y={50} width={200}
+                                subcomponents={["cli/main.py", "Configuration Parsing", "Experiment Initialization", "Baseline Loading"]} />
 
+                            <Node id="meta-controller" label="Python Meta-Controller" icon={Settings2} color="var(--purple)" x={50} y={220} width={200}
+                                subcomponents={["Population Initialization", "Evolutionary Loop Control", "State Management"]} />
+
+                            <Node id="qd-core" label="Quality-Diversity Core" icon={Network} color="var(--purple)" x={50} y={380} width={200}
+                                subcomponents={["gp/map_elites.py", "Map-Elites Archive", "Mutation/Crossover", "Novelty Scoring"]} />
+
+                            <Node id="pyo3-bridge" label="PyO3 FFI Bridge" icon={ArrowRightLeft} color="var(--teal)" x={400} y={380} width={200}
+                                subcomponents={["gp/rust_bridge.py", "Memory-safe Serialization", "Cross-language Types"]} />
+
+                            <Node id="rust-evaluator" label="Rust Parallel Evaluator" icon={Cpu} color="var(--red)" x={700} y={380} width={200}
+                                subcomponents={["rust_core/", "Parallel Batched Eval", "MSE Calculation", "High-Speed Benchmarks"]} />
+                        </motion.div>
+                    )}
+                </AnimatePresence>
             </div>
         </div>
     );

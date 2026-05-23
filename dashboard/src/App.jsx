@@ -12,6 +12,7 @@ const PlaygroundPage = lazy(() => import('./pages/PlaygroundPage'));
 const BaselinesPage = lazy(() => import('./pages/BaselinesPage'));
 const DiagnosticsPage = lazy(() => import('./pages/DiagnosticsPage'));
 const RustPage = lazy(() => import('./pages/RustPage'));
+const WebSandboxPage = lazy(() => import('./pages/WebSandboxPage'));
 
 // Premium loading skeleton
 const LoadingSkeleton = () => (
@@ -59,6 +60,11 @@ export default function App() {
                     <Route path="playground" element={
                         <Suspense fallback={<LoadingSkeleton />}>
                             <PlaygroundPage />
+                        </Suspense>
+                    } />
+                    <Route path="sandbox" element={
+                        <Suspense fallback={<LoadingSkeleton />}>
+                            <WebSandboxPage />
                         </Suspense>
                     } />
                     <Route path="schedules" element={

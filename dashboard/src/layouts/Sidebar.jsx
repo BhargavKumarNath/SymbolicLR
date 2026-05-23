@@ -8,6 +8,7 @@ const NAV = [
     { path: "/evolution", label: "Evolution", icon: "◉", desc: "How GP Works" },
     { path: "/map", label: "MAP-Elites", icon: "▦", desc: "QD Archive" },
     { path: "/playground", label: "Formula Lab", icon: "⚗", desc: "Interactive" },
+    { path: "/sandbox", label: "Web Sandbox", icon: "⏵", desc: "Live Sim" },
     { path: "/schedules", label: "Baselines", icon: "≋", desc: "Comparison" },
     { path: "/diagnostics", label: "Analytics", icon: "⏣", desc: "Run Data" },
     { path: "/rust", label: "Rust Engine", icon: "⚙", desc: "Performance" },

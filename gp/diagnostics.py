@@ -30,6 +30,7 @@ class GenerationMetrics:
     generation: int = 0
     best_loss: float = float("inf")
     median_loss: float = float("inf")
+    top_formula_latex: str = ""
     archive_size: int = 0
     occupancy_pct: float = 0.0
     structural_diversity: float = 1.0
@@ -172,7 +173,7 @@ class DiagnosticsLog:
             os.makedirs(dirpath, exist_ok=True)
 
         fieldnames = [
-            "generation", "best_loss", "median_loss", "archive_size",
+            "generation", "best_loss", "median_loss", "top_formula_latex", "archive_size",
             "occupancy_pct", "structural_diversity", "behavioral_diversity",
             "novelty_mean", "novelty_max", "new_niches", "controller_phase",
             "stagnation_epochs", "mutation_boost", "operator_dominant",

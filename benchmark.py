@@ -330,6 +330,12 @@ def run_evolution(
         # Update meta-controller (drives next generation's control signals)
         hof = archive.get_hall_of_fame(top_k=1)
         best_loss = hof[0][0] if hof else float("inf")
+        best_tree = hof[0][1] if hof else None
+        
+        best_latex = ""
+        if best_tree:
+            best_latex = tree_to_latex(simplify_tree(best_tree))
+            
         archive_size = len(archive.archive)
 
         if meta_ctrl:
@@ -355,6 +361,7 @@ def run_evolution(
                 generation=gen,
                 best_loss=best_loss,
                 median_loss=float(np.median(losses_in_archive)) if losses_in_archive else float("inf"),
+                top_formula_latex=best_latex,
                 archive_size=archive_size,
                 occupancy_pct=archive_stats["occupancy_pct"],
                 structural_diversity=round(struct_div, 4),
