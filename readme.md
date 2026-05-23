@@ -352,7 +352,7 @@ The `SymboLRConfig` singleton instantiates once at import time and propagates th
 
 ## Installation & Quickstart
 
-SymboLR requires Python 3.9+.
+SymboLR requires Python 3.9+ and Node.js (for the research dashboard).
 
 ```bash
 # Clone and install locally
@@ -369,12 +369,23 @@ This installs the `symbolr` CLI tool globally in your environment.
 symbolr benchmark --generations 30 --pop-size 100 --epochs 5 --seed 42
 ```
 
-### Review Diagnostics
+### Review Diagnostics via CLI
 
 ```bash
 symbolr diagnostics ./results/run_seed42.json --plot
 symbolr replay ./results/run_seed42.json
 ```
+
+### Research Dashboard (Vite + React)
+
+A static, Apple-inspired research visualization dashboard is provided in the `dashboard/` directory. It requires zero backend and runs completely locally via JSON ingestion.
+
+```bash
+cd dashboard
+npm install
+npm run dev
+```
+Open `http://localhost:5173` and drag-and-drop your `results/run_seed42.json` to visualize the evolutionary dynamics, bandit operator probabilities, and Hall of Fame Pareto front.
 
 ## Empirical Results
 

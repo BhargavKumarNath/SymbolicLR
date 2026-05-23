@@ -24,6 +24,20 @@ data_cache/
 .vscode/
 .idea/
 
+# OS and System Files
+.DS_Store
+Thumbs.db
+
+# Logs and Env files
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.env
+.env.local
+.env*.local
+
 # Generated artifacts
 graphify-out/
 
@@ -34,7 +48,8 @@ graphify-out/
 .pytest_cache/
 htmlcov/
 .coverage
-.gitignore
-results/
-fonts/
-symbolr.egg-info/
+
+# Project custom directories
+/results/
+/fonts/
+/symbolr.egg-info/
