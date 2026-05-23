@@ -40,7 +40,7 @@ pnpm-debug.log*
 
 # Generated artifacts
 graphify-out/
-
+template.jsx
 # Agent configs
 .agents/
 
