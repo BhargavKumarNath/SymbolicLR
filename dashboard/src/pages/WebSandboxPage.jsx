@@ -80,9 +80,9 @@ const WebSandboxPage = () => {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        pop_size: popSize,
+                        population_size: popSize,
                         generations: generations,
-                        epochs: epochs
+                        target_epochs: epochs
                     })
                 });
 
