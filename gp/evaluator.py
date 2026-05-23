@@ -156,6 +156,18 @@ class ParallelEvaluator:
         completed = 0
         eval_population = [population[i] for i in eval_indices]
 
+        # Algebraic Simplification Pass
+        # Prune redundant branches (e.g., x * 0 -> 0) before sending to Rust
+        from gp.simplify import simplify_tree
+        for idx in range(len(eval_population)):
+            eval_population[idx] = simplify_tree(eval_population[idx])
+            # Write the simplified tree back to the original population list
+            population[eval_indices[idx]] = eval_population[idx]
+
+        # Prime the Rust global DashMap cache with parallel batch evaluation
+        from gp.rust_bridge import evaluate_batch_schedules
+        evaluate_batch_schedules(eval_population, self.t_array)
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=safe_workers) as executor:
             future_to_local_idx = {
                 executor.submit(

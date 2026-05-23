@@ -118,8 +118,8 @@ def evaluate_synthetic(lr_schedule: np.ndarray, tree_size: int = 1) -> float:
     if lr_schedule[-1] > lr_schedule[0] * 1.5:
         avg_loss += 0.3
         
-    # Parsimony pressure
-    parsimony = getattr(cfg, 'parsimony_coefficient', 0.005)
+    # Parsimony pressure (Heavy Bloat Penalty)
+    parsimony = getattr(cfg, 'parsimony_coefficient', 0.05)
     avg_loss += parsimony * tree_size
         
     return float(np.clip(avg_loss, 0.0, 50.0))
@@ -176,9 +176,8 @@ def evaluate_fitness(
             loss += 0.3
             
         # Parsimony pressure for real evaluation too
-        # Scale parsimony down heavily since cross-entropy loss is very small (~0.2)
-        # Use an infinitesimally small penalty so it only acts as a tie-breaker
-        loss += 1e-5 * tree.size()
+        # Scale parsimony to actively penalize bloat (lambda * complexity_score)
+        loss += 0.005 * tree.size()
     else:
         # Synthetic fitness evaluation
         loss = evaluate_synthetic(lr_schedule, tree_size=tree.size())

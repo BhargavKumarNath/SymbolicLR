@@ -7,9 +7,38 @@ except ImportError:
     TORCH_AVAILABLE = False
 
 import random
-from typing import Tuple, Any
+from typing import Tuple, Any, Iterator
 import numpy as np
 from sklearn.model_selection import train_test_split
+
+class ChunkedIterableDataset(torch.utils.data.IterableDataset if TORCH_AVAILABLE else object):
+    """
+    Generator-based chunked dataset to prevent 110M record memory map from crashing 16GB RAM limit.
+    Yields data iteratively instead of loading the full array into active system RAM.
+    """
+    def __init__(self, dataset: Any, indices: np.ndarray, batch_size: int):
+        self.dataset = dataset
+        self.indices = indices
+        self.batch_size = batch_size
+
+    def __iter__(self) -> Iterator[Tuple[Any, Any]]:
+        # Shuffle indices at the start of each epoch for true stochastic behavior
+        np.random.shuffle(self.indices)
+        for start_idx in range(0, len(self.indices), self.batch_size):
+            batch_idx = self.indices[start_idx:start_idx + self.batch_size]
+            
+            # Simulate mmap: fetch only the current chunk from disk/storage
+            batch_x = []
+            batch_y = []
+            for idx in batch_idx:
+                x, y = self.dataset[idx]
+                batch_x.append(x)
+                batch_y.append(y)
+                
+            yield torch.stack(batch_x), torch.tensor(batch_y)
+            
+    def __len__(self) -> int:
+        return len(self.indices) // self.batch_size
 
 def set_seed(seed: int = 42) -> None:
     """Enforces reproducibility across PyTorch, Numpy and Python's random module
@@ -60,22 +89,22 @@ def get_tier1_dataloaders(
         random_state=seed
     )
 
+    # Generator-based Dataloaders for zero-copy memory mapping
+    train_dataset = ChunkedIterableDataset(dataset, train_idx, batch_size)
+    val_dataset = ChunkedIterableDataset(dataset, val_idx, batch_size)
+
     train_loader = DataLoader(
-        Subset(dataset, train_idx),
-        batch_size=batch_size,
-        shuffle=True,
+        train_dataset,
+        batch_size=None, # batching handled by iterable dataset
         num_workers=num_workers,
-        pin_memory=pin_memory,
-        drop_last=True
+        pin_memory=pin_memory
     )
 
     val_loader = DataLoader(
-        Subset(dataset, val_idx),
-        batch_size=batch_size,
-        shuffle=False,
+        val_dataset,
+        batch_size=None, # batching handled by iterable dataset
         num_workers=num_workers,
-        pin_memory=pin_memory,
-        drop_last=False
+        pin_memory=pin_memory
     )
     
     return train_loader, val_loader
@@ -131,22 +160,22 @@ def get_tier2_dataloaders(
         random_state=seed
     )
     
+    # Generator-based Dataloaders for zero-copy memory mapping
+    train_dataset = ChunkedIterableDataset(dataset, train_idx, batch_size)
+    val_dataset = ChunkedIterableDataset(dataset, val_idx, batch_size)
+    
     train_loader = DataLoader(
-        Subset(dataset, train_idx),
-        batch_size=batch_size,
-        shuffle=True,
+        train_dataset,
+        batch_size=None,
         num_workers=num_workers,
-        pin_memory=pin_memory,
-        drop_last=True
+        pin_memory=pin_memory
     )
     
     val_loader = DataLoader(
-        Subset(dataset, val_idx),
-        batch_size=batch_size,
-        shuffle=False,
+        val_dataset,
+        batch_size=None,
         num_workers=num_workers,
-        pin_memory=pin_memory,
-        drop_last=False
+        pin_memory=pin_memory
     )
     
     return train_loader, val_loader

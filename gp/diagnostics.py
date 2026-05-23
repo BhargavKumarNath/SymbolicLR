@@ -150,18 +150,46 @@ class DiagnosticsLog:
             "total_run_time_s": round(time.time() - self._run_start, 1),
         }
 
-    def export_json(self, path: str) -> None:
-        """Export full diagnostics log to a JSON file."""
+    def export_json(self, path: str, archive_data: Optional[List[Dict]] = None) -> None:
+        """
+        Export full diagnostics log to a JSON file using chunked/streaming writes
+        to prevent massive memory spikes and end-of-run freezes.
+        """
         dirpath = os.path.dirname(path)
         if dirpath:
             os.makedirs(dirpath, exist_ok=True)
 
-        data = {
-            "summary": self.summary(),
-            "generations": [asdict(r) for r in self._records],
-        }
         with open(path, "w") as f:
-            json.dump(data, f, indent=2)
+            f.write("{\n")
+            
+            # Write Summary
+            f.write('  "summary": ')
+            json.dump(self.summary(), f, indent=2)
+            f.write(",\n")
+            
+            # Write Generations array progressively
+            f.write('  "generations": [\n')
+            for i, r in enumerate(self._records):
+                # Clean nested dicts to prevent deep object graph bloat
+                cleaned_record = asdict(r)
+                if "hall_of_fame" in cleaned_record.get("operator_probs", {}):
+                    cleaned_record["operator_probs"].pop("hall_of_fame")
+                    
+                json.dump(cleaned_record, f, indent=2)
+                if i < len(self._records) - 1:
+                    f.write(",\n")
+            f.write("\n  ]")
+            
+            # Optionally stream the archive data (top 1 per niche)
+            if archive_data:
+                f.write(",\n  \"archive_elites\": [\n")
+                for i, elite in enumerate(archive_data):
+                    json.dump(elite, f, indent=2)
+                    if i < len(archive_data) - 1:
+                        f.write(",\n")
+                f.write("\n  ]")
+                
+            f.write("\n}\n")
 
     def export_csv(self, path: str) -> None:
         """Export per-generation metrics to a CSV file (operator_probs excluded)."""

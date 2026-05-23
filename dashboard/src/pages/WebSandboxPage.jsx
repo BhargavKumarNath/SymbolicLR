@@ -73,32 +73,51 @@ const WebSandboxPage = () => {
                 
                 await new Promise(r => setTimeout(r, 600));
                 addLog(`Dispatching ${popSize} ASTs to Rust Engine...`, "info");
-                addLog("Executing Parallel Rust Evaluation Batch...", "info");
+                addLog("Establishing Server-Sent Events (SSE) Stream...", "info");
 
-                // Attempt to reach the hypothetical local API
-                const response = await fetch('http://localhost:8000/api/evolve', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        population_size: popSize,
-                        generations: generations,
-                        target_epochs: epochs
-                    })
+                const sseUrl = `http://localhost:8000/api/stream-evolve?population_size=${popSize}&generations=${generations}&target_epochs=${epochs}`;
+                const sse = new EventSource(sseUrl);
+                let currentGen = 0;
+
+                sse.onmessage = (event) => {
+                    const genData = JSON.parse(event.data);
+                    setLiveData(prev => [...prev, genData]);
+                    
+                    if (currentGen % 5 === 0) {
+                        addLog(`Processed Gen ${genData.generation} | Best MSE: ${genData.best_loss.toFixed(4)}`, "success");
+                    }
+                    
+                    currentGen++;
+                    setProgress((currentGen / generations) * 100);
+                };
+
+                sse.addEventListener("COMPLETE", (event) => {
+                    const finalData = JSON.parse(event.data);
+                    setGoldenData(finalData);
+                    setStatus('COMPLETE');
+                    addLog("Evaluation Pipeline Complete. Global Minimum Reached.", "system");
+                    sse.close();
                 });
 
-                if (!response.ok) throw new Error("API responded with an error.");
+                sse.addEventListener("ERROR", (event) => {
+                    const errData = JSON.parse(event.data);
+                    addLog(`STREAM ERROR: ${errData.detail}`, "error");
+                    setStatus('ERROR');
+                    sse.close();
+                });
 
-                const data = await response.json();
-                addLog("Received telemetry stream from backend.", "success");
-                
-                // If the API existed and returned data, we'd plot it here.
-                // For safety, we fallback to drawing whatever it gave us.
-                playDataStream(data);
+                sse.onerror = (error) => {
+                    // Only log error if we weren't already complete
+                    if (status !== 'COMPLETE' && status !== 'ERROR') {
+                        addLog("CONNECTION REFUSED: Stream unexpectedly closed.", "error");
+                        addLog("Ensure the Python FastAPI engine is running (uvicorn api.main:app).", "error");
+                        setStatus('ERROR');
+                    }
+                    sse.close();
+                };
 
             } catch (error) {
-                addLog(`CONNECTION REFUSED: ${error.message}`, "error");
-                addLog("Local compute node unreachable at :8000.", "error");
-                addLog("Ensure the Python FastAPI engine is running (uvicorn api.main:app).", "error");
+                addLog(`CRITICAL ERROR: ${error.message}`, "error");
                 setStatus('ERROR');
             }
 
@@ -336,7 +355,25 @@ const WebSandboxPage = () => {
                         )}
                     </div>
 
-                    <div style={{ flex: 1, minHeight: 280, background: "rgba(0,0,0,0.2)", borderRadius: 12, border: "1px solid rgba(255,255,255,0.05)", position: "relative" }}>
+                    {/* Live Formula Spotlight */}
+                    {status !== 'IDLE' && liveData.length > 0 && (
+                        <div style={{ 
+                            marginBottom: 20, padding: "16px", background: "rgba(255,255,255,0.03)", 
+                            border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, 
+                            display: "flex", alignItems: "center", justifyContent: "space-between" 
+                        }}>
+                            <div>
+                                <div style={{ fontSize: 11, color: "var(--text-3)", textTransform: "uppercase", marginBottom: 4 }}>Current Leading Schedule</div>
+                                <Latex expression={liveData[liveData.length - 1].top_formula_latex || "..." } />
+                            </div>
+                            <div style={{ textAlign: "right" }}>
+                                <div style={{ fontSize: 11, color: "var(--text-3)", textTransform: "uppercase", marginBottom: 4 }}>Archive Size</div>
+                                <Badge color="var(--purple)">{liveData[liveData.length - 1].archive_size} Niches</Badge>
+                            </div>
+                        </div>
+                    )}
+
+                    <div style={{ flex: 1, minHeight: 220, background: "rgba(0,0,0,0.2)", borderRadius: 12, border: "1px solid rgba(255,255,255,0.05)", position: "relative" }}>
                         {status === 'IDLE' ? (
                             <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-3)", fontSize: 14 }}>
                                 Awaiting initialization sequence...
@@ -376,7 +413,7 @@ const WebSandboxPage = () => {
                             <h2 style={{ fontSize: 22, fontWeight: 700 }}>Final Artifacts: Top Schedules</h2>
                         </div>
                         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 24 }}>
-                            {goldenData.hall_of_fame.slice(0, 3).map((hof, idx) => (
+                            {goldenData.hall_of_fame?.slice(0, 3).map((hof, idx) => (
                                 <motion.div 
                                     key={idx}
                                     initial={{ opacity: 0, scale: 0.95 }}

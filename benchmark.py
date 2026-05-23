@@ -77,6 +77,8 @@ def _apply_operator(
         return constant_perturbation(p1)
 
 
+from typing import Callable
+
 def run_evolution(
     generations: int,
     pop_size: int,
@@ -85,6 +87,7 @@ def run_evolution(
     seed: int,
     console: Console,
     wandb_enabled: bool = False,
+    generation_callback: Callable[[dict], None] = None,
 ) -> DiagnosticsLog:
     """
     Core evolution loop. Returns a DiagnosticsLog for offline analysis.
@@ -102,9 +105,7 @@ def run_evolution(
             f"[bold green]GPU Model:[/bold green] {torch.cuda.get_device_name(0)}"
         )
 
-    # -----------------------------------------------------------------------
     # Data & model setup
-    # -----------------------------------------------------------------------
     console.print("\n[bold yellow]Allocating Dataset to VRAM Cache...[/bold yellow]")
     fidelity = FidelityManager(seed=seed)
     train_loader, val_loader = fidelity.get_low_fidelity(device, batch_size=256)
@@ -118,9 +119,7 @@ def run_evolution(
         device, in_channels=1, init_seed=init_seed
     )
 
-    # -----------------------------------------------------------------------
     # Phase 3: Subsystem initialization
-    # -----------------------------------------------------------------------
     novelty_archive = NoveltyArchive(
         max_size=cfg.novelty_archive_size,
         k_neighbours=cfg.novelty_k_neighbours,
@@ -154,9 +153,7 @@ def run_evolution(
         buffer_size=cfg.surrogate_buffer_size,
     ) if cfg.surrogate_enabled else None
 
-    # -----------------------------------------------------------------------
     # Generation 0: Initial population
-    # -----------------------------------------------------------------------
     console.print(
         "\n[bold magenta]Initializing Generation 0 (Ramped Half-and-Half)...[/bold magenta]"
     )
@@ -194,15 +191,13 @@ def run_evolution(
             archive.try_add(simplified, raw_fit, effective_loss=effective_fit)
             progress.advance(eval_task)
 
-    # -----------------------------------------------------------------------
     # MAP-Elites Evolution Loop
-    # -----------------------------------------------------------------------
     console.print("\n[bold cyan]Beginning MAP-Elites Evolution...[/bold cyan]")
 
     for gen in range(1, generations + 1):
         gen_start = time.time()
 
-        # --- Read control signals ---
+        # Read control signals
         current_phase = meta_ctrl.phase if meta_ctrl else Phase.EXPLOIT
         mutation_boost = meta_ctrl.mutation_boost if meta_ctrl else 1.0
         novelty_weight = meta_ctrl.novelty_weight if meta_ctrl else cfg.novelty_weight
@@ -212,7 +207,7 @@ def run_evolution(
         effective_crossover = max(0.05, cfg.crossover_rate + xo_delta)
         effective_mutation = min(0.80, cfg.mutation_rate * mutation_boost)
 
-        # --- Sample parents from archive + optional immigrants ---
+        # Sample parents from archive + optional immigrants
         parents = archive.sample_parents(pop_size)
         if not parents:
             parents = population.copy()
@@ -224,7 +219,7 @@ def run_evolution(
             else:
                 parents = parents + immigrants
 
-        # --- Generate offspring using operator controller or static rates ---
+        # Generate offspring using operator controller or static rates
         offspring: list = []
         offspring_ops: list = []   # parallel list tracking which op created each offspring
 
@@ -255,7 +250,7 @@ def run_evolution(
         # Simplify
         offspring = [simplify_tree(ind) for ind in offspring]
 
-        # --- Evaluate ---
+        # Evaluate
         # Build always_evaluate mask: structurally new = unseen hash
         seen_hashes = evaluator._fitness_cache.keys()
         always_eval = [off.get_hash() not in seen_hashes for off in offspring]
@@ -268,7 +263,7 @@ def run_evolution(
             always_evaluate=always_eval,
         )
 
-        # --- Archive insertion + operator outcome recording ---
+        # Archive insertion + operator outcome recording
         additions = 0
         for ind, raw_fit, op_name in zip(offspring, raw_fitnesses, offspring_ops):
             if not np.isfinite(raw_fit):
@@ -312,7 +307,7 @@ def run_evolution(
             if op_controller:
                 op_controller.record_outcome(op_name, entered)
 
-        # --- Post-generation updates ---
+        # Post-generation updates
         archive.increment_ages()
 
         # Update operator controller EMA
@@ -343,12 +338,12 @@ def run_evolution(
 
         gen_time = time.time() - gen_start
 
-        # --- Flush novelty stats for diagnostics ---
+        # Flush novelty stats for diagnostics
         novelty_mean, novelty_max = 0.0, 0.0
         if diagnostics:
             novelty_mean, novelty_max = diagnostics.flush_novelty_stats()
 
-        # --- Collect diagnostics ---
+        # Collect diagnostics
         if diagnostics:
             archive_stats = archive.get_stats()
             op_stats = op_controller.get_stats() if op_controller else {}
@@ -379,7 +374,7 @@ def run_evolution(
                 gen_time_s=round(gen_time, 1),
             ))
 
-        # --- Terminal output ---
+        # Terminal output
         phase_str = f"[yellow]{current_phase.value.upper()}[/yellow]"
         op_str = ""
         if op_controller:
@@ -407,9 +402,15 @@ def run_evolution(
                 "controller_phase": current_phase.value,
             })
 
-    # -----------------------------------------------------------------------
+        if generation_callback:
+            generation_callback({
+                "generation": gen,
+                "best_loss": best_loss,
+                "top_formula_latex": best_latex,
+                "archive_size": archive_size
+            })
+
     # Memetic Refinement + Hall of Fame
-    # -----------------------------------------------------------------------
     console.print(
         "\n[bold yellow]Executing Memetic L-BFGS-B Optimization on Hall of Fame...[/bold yellow]"
     )
@@ -449,27 +450,15 @@ def run_evolution(
 
     console.print(table)
 
-    # -----------------------------------------------------------------------
     # Diagnostics export
-    # -----------------------------------------------------------------------
     if diagnostics and cfg.diagnostics_enabled:
         os.makedirs(cfg.diagnostics_export_path, exist_ok=True)
         json_path = os.path.join(cfg.diagnostics_export_path, f"run_seed{seed}.json")
         csv_path = os.path.join(cfg.diagnostics_export_path, f"run_seed{seed}.csv")
         
-        # Inject HoF into the diagnostics before export
-        diagnostics._records[-1].operator_probs["hall_of_fame"] = hof_results
-        
-        diagnostics.export_json(json_path)
+        # Let the new streaming export_json handle the HoF injection efficiently
+        diagnostics.export_json(json_path, archive_data=hof_results)
         diagnostics.export_csv(csv_path)
-        
-        # Remove the hacky HoF injection from the exported JSON by writing a cleaner one
-        # Actually, diagnostics.export_json just dumps the data. We'll append it safely.
-        with open(json_path, "r") as f:
-            data = __import__("json").load(f)
-        data["hall_of_fame"] = hof_results
-        with open(json_path, "w") as f:
-            __import__("json").dump(data, f, indent=2)
 
         summary = diagnostics.summary()
         console.print(

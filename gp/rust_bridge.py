@@ -49,6 +49,25 @@ def evaluate_schedule(tree: "Node", t_array: np.ndarray) -> np.ndarray:
         warnings.warn(f"Schedule evaluation failed: {e}", RuntimeWarning, stacklevel=2)
         return np.full_like(t_array, 1e-3)
 
+def evaluate_batch_schedules(trees: list["Node"], t_array: np.ndarray) -> np.ndarray:
+    """
+    Evaluates a batch of GP trees in a single PyO3 FFI call.
+    Leverages Rust's Rayon parallelization and DashMap caching.
+    Returns a 2D numpy array of shape (len(trees), len(t_array)).
+    """
+    try:
+        if RUST_AVAILABLE and _rust_backend is not None and hasattr(_rust_backend, "evaluate_batch"):
+            prefixes = [tree.to_prefix() for tree in trees]
+            result = _rust_backend.evaluate_batch(prefixes, t_array)
+            result = np.asarray(result, dtype=np.float64)
+            result = np.nan_to_num(result, nan=1e-4, posinf=1.0, neginf=1e-7)
+            result = np.clip(result, 1e-7, 10.0)
+            return result
+        else:
+            return np.vstack([evaluate_schedule(t, t_array) for t in trees])
+    except Exception as e:
+        warnings.warn(f"Batch schedule evaluation failed: {e}", RuntimeWarning, stacklevel=2)
+        return np.full((len(trees), len(t_array)), 1e-3)
 
 def evaluate_schedule_from_prefix(prefix: str, t_array: np.ndarray) -> np.ndarray:
     """

@@ -73,7 +73,7 @@ def subtree_crossover(parent1: Node, parent2: Node, max_depth: int = 7) -> Node:
         
     _clear_all_caches(p1)
     
-    if p1.depth() > max_depth:
+    if p1.depth() > max_depth or p1.size() > 15:
         return copy.deepcopy(parent1)
     return p1
 
@@ -91,7 +91,7 @@ def subtree_mutation(parent: Node, max_mutation_depth: int = 4, max_depth: int =
     n.children = new_tree.children
     
     _clear_all_caches(p)
-    if p.depth() > max_depth: 
+    if p.depth() > max_depth or p.size() > 15: 
         return copy.deepcopy(parent)
     return p
 
