@@ -182,3 +182,123 @@ class ProbeTrainer:
                 total_loss += loss.item()
                 batches += 1
         return total_loss / max(1, batches)
+
+
+class CUDABatchEvaluator:
+    """
+    Evaluates genetic programming prefix formulas against a surrogate dataset
+    entirely on the GPU using PyTorch tensor operations.
+    """
+    def __init__(self, data_labels: np.ndarray, device: str = 'cuda:0'):
+        if not TORCH_AVAILABLE:
+            raise RuntimeError("PyTorch is required for CUDABatchEvaluator")
+            
+        self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
+        
+        # Load the surrogate dataset directly into VRAM
+        self.labels = torch.tensor(data_labels, dtype=torch.float32, device=self.device)
+        self.time_steps = len(self.labels)
+        
+        # Pre-allocate time tensor t in VRAM
+        self.t = torch.linspace(0.0, 1.0, self.time_steps, dtype=torch.float32, device=self.device)
+        
+        # Constants cache on GPU
+        self._const_cache = {}
+
+        if self.device.type == 'cuda':
+            print(f"[System] RTX CUDA Device Initialized. VRAM Allocated for {self.time_steps} records.")
+
+    def _get_const(self, val: float) -> torch.Tensor:
+        if val not in self._const_cache:
+            self._const_cache[val] = torch.full_like(self.t, val)
+        return self._const_cache[val]
+
+    def _parse_and_evaluate(self, prefix_str: str) -> torch.Tensor:
+        """
+        Parses a prefix string and maps it directly to PyTorch tensor operations.
+        Prefix parsing works cleanly by scanning the tokens right-to-left.
+        """
+        tokens = prefix_str.strip().split()
+        stack = []
+        
+        for token in reversed(tokens):
+            if token == 'x':
+                stack.append(self.t)
+            elif token == '+':
+                left = stack.pop()
+                right = stack.pop()
+                stack.append(left + right)
+            elif token == '-':
+                left = stack.pop()
+                right = stack.pop()
+                stack.append(left - right)
+            elif token == '*':
+                left = stack.pop()
+                right = stack.pop()
+                stack.append(left * right)
+            elif token == '/':
+                left = stack.pop()
+                right = stack.pop()
+                # Protected division: if right is 0, return 1 (standard GP protection)
+                # But to vectorize, we add a small epsilon
+                epsilon = 1e-6
+                safe_right = torch.where(torch.abs(right) < epsilon, torch.sign(right) * epsilon + epsilon * (right == 0), right)
+                stack.append(left / safe_right)
+            elif token == 'sin':
+                stack.append(torch.sin(stack.pop()))
+            elif token == 'cos':
+                stack.append(torch.cos(stack.pop()))
+            elif token == 'exp':
+                # Protected exp to prevent Inf
+                val = torch.clamp(stack.pop(), max=20.0)
+                stack.append(torch.exp(val))
+            elif token == 'log':
+                # Protected log
+                val = stack.pop()
+                safe_val = torch.where(torch.abs(val) < 1e-6, torch.full_like(val, 1e-6), torch.abs(val))
+                stack.append(torch.log(safe_val))
+            else:
+                # Constant
+                try:
+                    val = float(token)
+                    stack.append(self._get_const(val))
+                except ValueError:
+                    # Fallback for unrecognized tokens
+                    stack.append(self._get_const(0.0))
+                    
+        return stack[0]
+
+    def evaluate_batch(self, formulas: list[str]) -> list[float]:
+        """
+        Invoked via PyO3 from Rust.
+        Accepts a batch of prefix strings and returns their MSE losses.
+        """
+        if not formulas:
+            return []
+            
+        losses = []
+        
+        with torch.no_grad():
+            for formula in formulas:
+                try:
+                    y_pred = self._parse_and_evaluate(formula)
+                    
+                    # Compute MSE
+                    mse = torch.mean((y_pred - self.labels) ** 2)
+                    
+                    # Add parsimony pressure based on string length (proxy for AST size)
+                    # Node count is approximately len(formulas.split())
+                    size = len(formula.split())
+                    parsimony = 0.01 * size
+                    
+                    loss = mse.item() + parsimony
+                    
+                    if not math.isfinite(loss):
+                        loss = float('inf')
+                        
+                except Exception as e:
+                    loss = float('inf')
+                    
+                losses.append(loss)
+                
+        return losses

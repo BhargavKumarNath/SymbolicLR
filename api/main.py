@@ -1,20 +1,20 @@
 import os
 import json
 import asyncio
+import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from rich.console import Console
 
-# Import the core evolution engine from the root benchmark module
-from benchmark import run_evolution
+from gp.rust_bridge import RustEvolutionBridge
 
 console = Console()
 
 app = FastAPI(
     title="SymboLR Local Compute Engine (SSE Enabled)",
     description="High-performance FastAPI bridge connecting the React dashboard to the Rust/PyO3 Quality-Diversity Engine.",
-    version="2.0.0"
+    version="3.0.0"  # Phase 4 update
 )
 
 app.add_middleware(
@@ -26,58 +26,74 @@ app.add_middleware(
 )
 
 @app.get("/api/stream-evolve")
-async def stream_evolve(population_size: int, generations: int, target_epochs: int):
+async def stream_evolve(population_size: int = 50, generations: int = 50, target_epochs: int = 100):
     """
-    Triggers the engine in a background thread and streams Live Server-Sent Events (SSE).
+    Triggers the Thick Rust Core in a background thread and streams Live Server-Sent Events (SSE).
     """
-    console.rule("[bold cyan]SymboLR: Incoming Streaming API Request[/bold cyan]")
+    console.rule("[bold cyan]SymboLR: Incoming Streaming API Request (Rust Core)[/bold cyan]")
     
-    queue = asyncio.Queue()
-    loop = asyncio.get_running_loop()
-    SEED = 42
-
-    def on_generation(metrics: dict):
-        # Thread-safe handoff to the asyncio event loop
-        loop.call_soon_threadsafe(queue.put_nowait, ("metrics", metrics))
+    # 1. Ingest Surrogate Dataset
+    data_path = os.path.join("data", "surrogate_labels.npy")
+    if not os.path.exists("data"):
+        os.makedirs("data", exist_ok=True)
         
-    def worker():
-        try:
-            # Execute heavy evolution loop
-            run_evolution(
-                generations=generations,
-                pop_size=population_size,
-                epochs=target_epochs,
-                workers=4,
-                seed=SEED,
-                console=console,
-                wandb_enabled=False,
-                generation_callback=on_generation
-            )
-            
-            # Send final completion artifact
-            artifact_path = os.path.join("results", f"run_seed{SEED}.json")
-            if os.path.exists(artifact_path):
-                with open(artifact_path, "r") as f:
-                    final_data = json.load(f)
-                loop.call_soon_threadsafe(queue.put_nowait, ("complete", final_data))
-            else:
-                loop.call_soon_threadsafe(queue.put_nowait, ("error", "Artifact not found"))
-        except Exception as e:
-            loop.call_soon_threadsafe(queue.put_nowait, ("error", str(e)))
+    if not os.path.exists(data_path):
+        console.print(f"[dim]Mocking surrogate dataset at {data_path}...[/dim]")
+        dummy_labels = np.random.rand(target_epochs).astype(np.float64)
+        np.save(data_path, dummy_labels)
+        
+    # Zero-copy memory mapping of the surrogate dataset
+    console.print(f"[dim]Ingesting dataset via mmap: {data_path}[/dim]")
+    probe_labels = np.load(data_path, mmap_mode='r')
+    
+    # Ensure C-contiguous for Rust (if it isn't already)
+    if not probe_labels.flags['C_CONTIGUOUS']:
+        probe_labels = np.ascontiguousarray(probe_labels)
 
-    # Dispatch the synchronous worker to a background thread
-    asyncio.create_task(asyncio.to_thread(worker))
+    # 2. Instantiate Rust Evolution Engine
+    try:
+        from models.probe import CUDABatchEvaluator
+        evaluator = CUDABatchEvaluator(data_labels=probe_labels)
+        
+        bridge = RustEvolutionBridge(
+            eval_callback=evaluator.evaluate_batch,
+            max_generations=generations,
+            pop_size=population_size,
+            seed=42
+        )
+    except Exception as e:
+        console.print(f"[bold red]Failed to initialize Rust bridge:[/bold red] {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
+    # 3. Stream Generator
     async def event_generator():
+        stream_iter = bridge.stream()
+        
         while True:
-            msg_type, data = await queue.get()
-            if msg_type == "metrics":
-                yield f"data: {json.dumps(data)}\n\n"
-            elif msg_type == "complete":
-                yield f"event: COMPLETE\ndata: {json.dumps(data)}\n\n"
-                break
-            elif msg_type == "error":
-                yield f"event: ERROR\ndata: {json.dumps({'detail': data})}\n\n"
+            try:
+                # Execute one generation (parallel Rust execution) without blocking the asyncio loop
+                result = await asyncio.to_thread(next, stream_iter, None)
+                
+                if result is None:
+                    # Max generations reached
+                    yield f"event: COMPLETE\ndata: {json.dumps({'status': 'done'})}\n\n"
+                    break
+                
+                # Format to match the React frontend's schema expectations
+                payload = {
+                    "generation": result.generation_number,
+                    "best_loss": result.best_mse,
+                    "top_formula_latex": result.top_formula_latex,
+                    "archive_size": result.archive_size
+                }
+                
+                console.print(f"[dim]Processed Gen {result.generation_number} | Best MSE: {result.best_mse:.4f} | Archive: {result.archive_size}[/dim]")
+                
+                yield f"data: {json.dumps(payload)}\n\n"
+                
+            except Exception as e:
+                console.print(f"[bold red]Stream error:[/bold red] {e}")
+                yield f"event: ERROR\ndata: {json.dumps({'detail': str(e)})}\n\n"
                 break
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
