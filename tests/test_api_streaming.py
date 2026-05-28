@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from httpx import AsyncClient, ASGITransport
 
 from src.symbolr.api.main import app
-from src.symbolr.engine.bridge import RustEvolutionBridge
+from src.symbolr.core.bridge import RustEvolutionBridge
 from src.symbolr.torch_impl.evaluator import CUDABatchEvaluator
 
 @pytest.mark.asyncio

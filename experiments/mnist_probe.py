@@ -9,9 +9,9 @@ import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
-from src.symbolr.engine.evaluator import BaseEvaluator
-from src.symbolr.engine.bridge import RustEvolutionBridge
-from src.symbolr.cli.artifacts import export_to_pytorch
+from src.symbolr.core.evaluator import BaseEvaluator
+from src.symbolr.core.bridge import RustEvolutionBridge
+from src.symbolr.artifacts.pytorch_export import export_to_pytorch
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

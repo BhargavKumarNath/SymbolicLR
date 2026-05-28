@@ -17,9 +17,6 @@ rust_core/target/
 # Data cache (downloaded datasets)
 data_cache/
 
-# Streamlit secrets
-.streamlit/secrets.toml
-
 # IDE
 .vscode/
 .idea/
@@ -39,7 +36,6 @@ pnpm-debug.log*
 .env*.local
 
 # Generated artifacts
-graphify-out/
 template.jsx
 # Agent configs
 .agents/

@@ -1,9 +1,10 @@
 import numpy as np
 from rich.console import Console
 
-from src.symbolr.engine.bridge import RustEvolutionBridge
-from src.symbolr.engine.synthetic import SyntheticEvaluator
-from src.symbolr.cli.artifacts import export_to_pytorch, export_to_latex
+from src.symbolr.core.bridge import RustEvolutionBridge
+from src.symbolr.evaluators.synthetic import SyntheticEvaluator
+from src.symbolr.artifacts.pytorch_export import export_to_pytorch
+from src.symbolr.artifacts.latex_export import export_to_latex
 
 console = Console()
 
