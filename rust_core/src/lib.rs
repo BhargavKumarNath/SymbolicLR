@@ -78,49 +78,35 @@ fn finite_f64(v: f64) -> serde_json::Value {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// EvolutionStream — the Phase 3 PyO3 streaming iterator
+// EvolutionEngine — the Phase 3 PyO3 Ask-and-Tell iterator
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Rust-native MAP-Elites evolutionary stream, exposed to Python as an iterator.
-///
-/// ## Memory model
-///
-/// All evolutionary state (archive, RNG, population, time-step array, probe
-/// labels) lives in **Rust-owned memory** for the entire lifetime of the
-/// object.  No Python object is kept alive after `__new__` returns.
-///
-/// ## Python usage
-///
-/// ```python
-/// stream = symbolr_rust.EvolutionStream(
-///     probe_labels   = y_train,           # numpy array, copied once
-///     max_generations = 100,
-///     pop_size        = 50,
-///     seed            = 42,
-/// )
-/// for json_str in stream:               # __next__ = one parallel generation
-///     info = json.loads(json_str)
-///     print(info["best_mse"], info["top_formula_latex"])
-/// ```
+use serde::{Serialize, Deserialize};
+
+fn default_rng() -> SmallRng {
+    SmallRng::seed_from_u64(0)
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct EvolutionState {
     archive:    MapElitesArchive,
     evo_config: EvolutionConfig,
-    eval_callback: PyObject,
+    #[serde(skip, default = "default_rng")]
     rng:        SmallRng,
 }
 
 #[pyclass]
-pub struct EvolutionStream {
+pub struct EvolutionEngine {
     state: Option<EvolutionState>,
     current_generation: usize,
     max_generations:    usize,
+    pending_offspring:  Vec<Expr>,
 }
 
 #[pymethods]
-impl EvolutionStream {
+impl EvolutionEngine {
     #[new]
     #[pyo3(signature = (
-        eval_callback,
         max_generations = 50,
         pop_size        = 50,
         seed            = 42,
@@ -128,7 +114,6 @@ impl EvolutionStream {
         mutation_rate   = 0.70,
     ))]
     fn new(
-        eval_callback:   PyObject,
         max_generations: usize,
         pop_size:        usize,
         seed:            u64,
@@ -149,7 +134,6 @@ impl EvolutionStream {
         let state = EvolutionState {
             archive,
             evo_config,
-            eval_callback,
             rng,
         };
 
@@ -157,22 +141,16 @@ impl EvolutionStream {
             state: Some(state),
             current_generation: 0,
             max_generations,
+            pending_offspring: Vec::new(),
         })
     }
 
-    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
-        slf
-    }
-
-    fn __next__(mut slf: PyRefMut<'_, Self>, py: Python<'_>) -> Option<String> {
-        if slf.current_generation >= slf.max_generations {
-            return None;
+    fn ask(&mut self) -> PyResult<Vec<String>> {
+        if self.current_generation >= self.max_generations {
+            return Ok(Vec::new());
         }
 
-        let gen = slf.current_generation + 1;
-        let mut state = slf.state.take().expect("Stream state poisoned or accessed concurrently");
-
-        let start = std::time::Instant::now();
+        let mut state = self.state.take().expect("Stream state poisoned or accessed concurrently");
 
         // 1. Generate offspring on CPU
         let offspring = crate::evolution::generate_offspring(
@@ -183,10 +161,21 @@ impl EvolutionStream {
 
         // 2. Extract prefix formulas
         let formulas: Vec<String> = offspring.iter().map(|e| e.to_prefix()).collect();
+        
+        self.pending_offspring = offspring;
+        self.state = Some(state);
 
-        // 3. Call Python callback (holds GIL, blocks async loop)
-        let py_res = state.eval_callback.call1(py, (formulas,)).expect("Python evaluation callback failed");
-        let fitnesses: Vec<f64> = py_res.extract(py).expect("Failed to extract List[float] from evaluate_batch");
+        Ok(formulas)
+    }
+
+    fn tell(&mut self, fitnesses: Vec<f64>) -> PyResult<String> {
+        if self.pending_offspring.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err("No pending offspring. Call ask() first."));
+        }
+
+        let gen = self.current_generation + 1;
+        let mut state = self.state.take().expect("Stream state poisoned or accessed concurrently");
+        let offspring = std::mem::take(&mut self.pending_offspring);
 
         // 4. Update the MAP-Elites Archive
         let stats = crate::evolution::update_archive(
@@ -194,12 +183,12 @@ impl EvolutionStream {
             offspring,
             fitnesses,
             gen,
-            start.elapsed().as_millis(),
+            0, // gen_time_ms will be handled by python side now
         );
 
         // Restore state
-        slf.state = Some(state);
-        slf.current_generation = gen;
+        self.state = Some(state);
+        self.current_generation = gen;
 
         let json = serde_json::json!({
             "generation_number": stats.generation,
@@ -212,7 +201,7 @@ impl EvolutionStream {
             "gen_time_ms":       stats.gen_time_ms,
         });
 
-        Some(json.to_string())
+        Ok(json.to_string())
     }
 
     fn archive_stats(&self) -> String {
@@ -245,6 +234,35 @@ impl EvolutionStream {
             }))
             .collect();
         serde_json::json!(hof).to_string()
+    }
+    
+    fn save_checkpoint(&self, path: &str) -> PyResult<()> {
+        let state = self.state.as_ref().expect("Engine state poisoned");
+        let checkpoint = serde_json::json!({
+            "state": state,
+            "current_generation": self.current_generation,
+            "max_generations": self.max_generations,
+        });
+        let file = std::fs::File::create(path).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        serde_json::to_writer(file, &checkpoint).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        Ok(())
+    }
+
+    #[staticmethod]
+    fn load_checkpoint(path: &str) -> PyResult<Self> {
+        let file = std::fs::File::open(path).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        let checkpoint: serde_json::Value = serde_json::from_reader(file).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        
+        let state: EvolutionState = serde_json::from_value(checkpoint["state"].clone()).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        let current_generation = checkpoint["current_generation"].as_u64().unwrap_or(0) as usize;
+        let max_generations = checkpoint["max_generations"].as_u64().unwrap_or(50) as usize;
+
+        Ok(Self {
+            state: Some(state),
+            current_generation,
+            max_generations,
+            pending_offspring: Vec::new(),
+        })
     }
 
     #[getter]
@@ -326,8 +344,8 @@ fn symbolr_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Legacy schedule evaluators (Phase 1 compatibility).
     m.add_function(wrap_pyfunction!(evaluate_fast, m)?)?;
     m.add_function(wrap_pyfunction!(evaluate_batch, m)?)?;
-    // Phase 3: streaming evolution iterator.
-    m.add_class::<EvolutionStream>()?;
+    // Phase 3: ask-and-tell evolution iterator.
+    m.add_class::<EvolutionEngine>()?;
     Ok(())
 }
 
@@ -341,43 +359,32 @@ mod ffi_tests {
     use serde_json::Value;
 
     #[test]
-    fn test_evolution_stream_ffi() {
+    fn test_evolution_engine_ffi() {
         // Initialize the Python interpreter for testing outside of a module context
         pyo3::prepare_freethreaded_python();
 
         Python::with_gil(|py| {
-            // 1. Test: PyObject Callback Init
-            let py_code = "lambda formulas: [1.0 for _ in formulas]";
-            let eval_callback = py.eval_bound(py_code, None, None)
-                .expect("Failed to compile lambda")
-                .into_any()
-                .unbind();
-
+            // 1. Test: Engine Init
             let max_generations = 3;
-            let stream = EvolutionStream::new(
-                eval_callback,
+            let mut engine = EvolutionEngine::new(
                 max_generations,
                 10, // pop_size
                 42, // seed
                 0.2, // crossover_rate
                 0.7, // mutation_rate
-            ).expect("Failed to initialize EvolutionStream");
+            ).expect("Failed to initialize EvolutionEngine");
 
-            assert_eq!(stream.generation(), 0, "Initial generation should be 0");
-            assert_eq!(stream.max_generations(), 3, "max_generations should be 3");
+            assert_eq!(engine.generation(), 0, "Initial generation should be 0");
+            assert_eq!(engine.max_generations(), 3, "max_generations should be 3");
 
-            // Bind the stream to Python to get PyRefMut for `__next__`
-            let bound_stream = Bound::new(py, stream).expect("Failed to bind stream");
-
-            // 2. Test: Iterator Yield Protocol
+            // 2. Test: Ask-and-Tell Protocol
             for expected_gen in 1..=3 {
-                let slf = bound_stream.borrow_mut();
-                
-                // Manually call `__next__`
-                let result = EvolutionStream::__next__(slf, py);
-                assert!(result.is_some(), "Expected Some(String) on generation {}", expected_gen);
-                
-                let json_str = result.unwrap();
+                let formulas = engine.ask().expect("ask() should return formulas");
+                assert_eq!(formulas.len(), 10, "Should generate exactly pop_size offspring");
+
+                let fitnesses = vec![1.0; 10]; // mock Python callback evaluation
+                let json_str = engine.tell(fitnesses).expect("tell() should return telemetry JSON");
+
                 let parsed: Value = serde_json::from_str(&json_str).expect("Result should be valid JSON");
                 
                 // Assert generation number increments correctly
@@ -390,10 +397,9 @@ mod ffi_tests {
                 assert!(parsed.get("top_formula_latex").is_some(), "Missing top_formula_latex");
             }
 
-            // 3. Test: StopIteration Enforcement
-            let slf = bound_stream.borrow_mut();
-            let result = EvolutionStream::__next__(slf, py);
-            assert!(result.is_none(), "Expected None (StopIteration) after max_generations");
+            // 3. Test: End of evolution
+            let formulas = engine.ask().expect("ask() should return empty at end");
+            assert!(formulas.is_empty(), "Expected empty vector after max_generations");
         });
     }
 }

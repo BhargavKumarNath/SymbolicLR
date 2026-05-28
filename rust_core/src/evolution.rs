@@ -30,6 +30,7 @@
 use crate::archive::{ArchiveConfig, MapElitesArchive};
 use crate::ast::Expr;
 use crate::operators::{apply_random_operator, ramped_half_and_half};
+use serde::{Serialize, Deserialize};
 
 use rand::Rng;
 
@@ -41,7 +42,7 @@ use rand::Rng;
 ///
 /// Mirrors Python's `evaluate_synthetic` from `gp/fitness.py` exactly,
 /// enabling direct numerical comparison during transition testing.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FitnessConfig {
     /// Number of quadratic loss landscape dimensions (default: 5).
     pub n_dims: usize,
@@ -65,7 +66,7 @@ impl Default for FitnessConfig {
 }
 
 /// Hyperparameters for the evolutionary loop.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EvolutionConfig {
     /// Number of offspring generated per generation.
     pub pop_size: usize,
@@ -92,7 +93,7 @@ impl Default for EvolutionConfig {
 }
 
 /// Per-generation telemetry snapshot — streamed to Python in Phase 3.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GenerationStats {
     pub generation: usize,
     pub best_loss: f64,

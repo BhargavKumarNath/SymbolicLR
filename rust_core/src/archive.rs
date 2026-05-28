@@ -18,6 +18,7 @@
 //!   • `increment_ages()` must be called exactly once per generation.
 
 use std::collections::HashMap;
+use serde::{Serialize, Deserialize};
 
 use crate::ast::Expr;
 
@@ -30,7 +31,7 @@ use crate::ast::Expr;
 pub type NicheKey = (usize, usize, usize);
 
 /// One slot in the archive — the elite individual for a niche.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Niche {
     /// The symbolic formula occupying this niche.
     pub expr: Expr,
@@ -49,7 +50,7 @@ pub struct Niche {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Immutable configuration for the archive grid dimensions and aging policy.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ArchiveConfig {
     pub size_bins: usize,
     pub com_bins: usize,
@@ -81,6 +82,7 @@ impl Default for ArchiveConfig {
 ///
 /// All archive state is owned by this struct — zero heap-allocated Python
 /// objects, zero GC pressure, deterministic drop order.
+#[derive(Serialize, Deserialize)]
 pub struct MapElitesArchive {
     /// Primary store: niche → elite individual.
     pub niches: HashMap<NicheKey, Niche>,
@@ -323,7 +325,7 @@ impl MapElitesArchive {
 // 4.  Stats snapshot (used for telemetry JSON later)
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchiveStats {
     pub occupied_niches: usize,
     pub max_niches: usize,

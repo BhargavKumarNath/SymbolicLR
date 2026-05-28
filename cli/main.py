@@ -1,21 +1,49 @@
 import os
+import sys
+# Add project root to path so 'src' module can be found when script is run directly
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import numpy as np
 import typer
 from rich.console import Console
 from rich.table import Table
 from rich.live import Live
 
-from gp.rust_bridge import run_evolution_stream
+from src.symbolr.engine.bridge import RustEvolutionBridge
 
 app = typer.Typer(
     name="symbolr",
-    help="SymboLR: Lightweight Research CLI for Symbolic Learning Rate Discovery",
-    no_args_is_help=True,
+    help="[bold cyan]SymboLR[/bold cyan]: Lightweight Research CLI for Symbolic Learning Rate Discovery",
+    no_args_is_help=False,
     add_completion=False,
+    rich_markup_mode="rich",
 )
 console = Console()
 
-@app.command(name="evolve", help="Run the Rust-powered Streaming Evolution")
+@app.callback(invoke_without_command=True)
+def main_callback(ctx: typer.Context):
+    """
+    [bold cyan]SymboLR[/bold cyan] Engine Control. Use [yellow]--help[/yellow] for the manual.
+    """
+    if ctx.invoked_subcommand is None:
+        from rich.panel import Panel
+        from rich.align import Align
+        
+        welcome_text = (
+            "[bold white]Welcome to the SymboLR Core CLI.[/bold white]\n\n"
+            "This high-performance engine uses a hybrid PyO3 / Rust architecture to dynamically\n"
+            "discover mathematical learning rate schedules.\n\n"
+            "Run [bold green]symbolr --help[/bold green] to see all available commands."
+        )
+        console.print(Align.center(Panel(
+            welcome_text,
+            title="[bold cyan]🚀 SymboLR Engine[/bold cyan]",
+            border_style="magenta",
+            expand=False,
+            padding=(1, 2)
+        )))
+
+@app.command(name="evolve", help="[bold green]Run the Rust-powered Streaming Evolution[/bold green]")
 def evolve(
     generations: int = typer.Option(50, "--generations", "-g", help="Number of generations"),
     pop_size: int = typer.Option(50, "--pop-size", "-p", help="Population size"),
@@ -50,16 +78,18 @@ def evolve(
     table.add_column("Top Formula", justify="left", style="magenta")
 
     try:
-        from models.probe import CUDABatchEvaluator
+        from src.symbolr.torch_impl.evaluator import CUDABatchEvaluator
         evaluator = CUDABatchEvaluator(data_labels=probe_labels)
         
+        bridge = RustEvolutionBridge(
+            eval_callback=evaluator.evaluate,
+            max_generations=generations,
+            pop_size=pop_size,
+            seed=seed,
+        )
+        
         with Live(table, console=console, refresh_per_second=10):
-            for result in run_evolution_stream(
-                eval_callback=evaluator.evaluate_batch,
-                max_generations=generations,
-                pop_size=pop_size,
-                seed=seed,
-            ):
+            for result in bridge.stream():
                 table.add_row(
                     str(result.generation_number),
                     f"{result.best_mse:.6f}",
@@ -72,6 +102,27 @@ def evolve(
         console.print("\n[bold red]Evolution interrupted by user.[/bold red]")
     except Exception as e:
         console.print(f"\n[bold red]Error:[/bold red] {e}")
+
+@app.command(name="dashboard", help="[bold blue]Launch the React Telemetry Dashboard[/bold blue]")
+def dashboard():
+    """Start the Vite development server for the FANG-grade UI."""
+    console.print("[bold blue]Starting React Dashboard...[/bold blue] (Make sure you are in the dashboard directory)")
+    os.system("npm run dev --prefix dashboard")
+
+@app.command(name="api", help="[bold magenta]Start the FastAPI Compute Hub[/bold magenta]")
+def api_server(
+    port: int = typer.Option(8000, "--port", "-p", help="Port to run the API on"),
+    host: str = typer.Option("0.0.0.0", "--host", "-h", help="Host address")
+):
+    """Boot up the API bridge to serve streaming requests from the Dashboard."""
+    import uvicorn
+    console.print(f"[bold magenta]Booting SymboLR Streaming Compute Hub on {host}:{port}...[/bold magenta]")
+    uvicorn.run("src.symbolr.api.main:app", host=host, port=port, reload=True)
+
+@app.command(name="benchmark", help="[bold yellow]Run full offline benchmark suite[/bold yellow]")
+def benchmark():
+    """Execute the full offline benchmark without UI streaming."""
+    console.print("[bold yellow]Offline Benchmark Mode Not Yet Configured in CLI.[/bold yellow]")
 
 if __name__ == "__main__":
     app()

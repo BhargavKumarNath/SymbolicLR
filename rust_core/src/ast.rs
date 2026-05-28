@@ -12,6 +12,7 @@
 use std::fmt;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use serde::{Serialize, Deserialize};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 1.  Hard Structural Caps
@@ -29,7 +30,7 @@ pub const MAX_DEPTH: usize = 7;
 /// Leaf variants (`Var`, `Const`) own no heap allocation.
 /// Binary variants box both children; unary variants box one child.
 /// This makes cloning O(n) in tree size and deeply safe to reason about.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub enum Expr {
     // ── Terminals ────────────────────────────────────────────────────────────
     /// The single input variable `t ∈ [0, 1]`.

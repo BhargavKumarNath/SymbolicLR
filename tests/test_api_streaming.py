@@ -5,9 +5,9 @@ import numpy as np
 from fastapi.testclient import TestClient
 from httpx import AsyncClient, ASGITransport
 
-from api.main import app
-from gp.rust_bridge import RustEvolutionBridge
-from models.probe import CUDABatchEvaluator
+from src.symbolr.api.main import app
+from src.symbolr.engine.bridge import RustEvolutionBridge
+from src.symbolr.torch_impl.evaluator import CUDABatchEvaluator
 
 @pytest.mark.asyncio
 async def test_ffi_async_non_blocking():
@@ -21,7 +21,7 @@ async def test_ffi_async_non_blocking():
     evaluator = CUDABatchEvaluator(dummy_labels)
     
     bridge = RustEvolutionBridge(
-        eval_callback=evaluator.evaluate_batch,
+        eval_callback=evaluator.evaluate,
         max_generations=5,
         pop_size=10,
         seed=42,
@@ -43,7 +43,7 @@ async def test_ffi_async_non_blocking():
     # We measure how many heartbeats happen during 1 next() call.
     # Since pop_size=10 is small, it might be too fast, so let's use a larger one to make sure.
     bridge_heavy = RustEvolutionBridge(
-        eval_callback=evaluator.evaluate_batch,
+        eval_callback=evaluator.evaluate,
         max_generations=5,
         pop_size=500,
         seed=42
