@@ -49,3 +49,6 @@ htmlcov/
 /results/
 /fonts/
 /symbolr.egg-info/
+
+.claude/
+research_journal/

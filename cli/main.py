@@ -124,13 +124,115 @@ def api_server(
     uvicorn.run("src.symbolr.api.main:app", host=host, port=port, reload=True)
 
 
-@app.command(name="benchmark", help="[bold yellow]Run baseline benchmark suite[/bold yellow]")
-def benchmark():
-    """Compare discovered formulas against all 7 baseline schedules."""
-    console.print(
-        "[bold yellow]Benchmark pipeline not yet configured.[/bold yellow]\n"
-        "Run Phase 4 to build the fair comparison harness."
+@app.command(name="benchmark", help="[bold yellow]Compare a formula against 7 baseline schedules[/bold yellow]")
+def benchmark(
+    formula:   str = typer.Option(
+        "cos * 3.14159 t",
+        "--formula", "-f",
+        help="Formula in prefix notation (e.g. 'cos * 3.14159 t')",
+    ),
+    seeds:     int = typer.Option(5,   "--seeds",      "-n", help="Evaluation seeds (≥7 for Wilcoxon power)"),
+    steps:     int = typer.Option(100, "--time-steps", "-t", help="LR schedule length"),
+    base_seed: int = typer.Option(42,  "--seed",       "-s", help="Base landscape seed"),
+    output:    str = typer.Option("",  "--output",     "-o", help="Save results to JSON file"),
+    baselines: str = typer.Option("",  "--baselines",  "-b", help="Comma-separated subset of baselines (default: all)"),
+):
+    """
+    Compare a discovered formula against all 7 canonical baseline LR schedules.
+
+    Both the formula and each baseline are evaluated under identical conditions:
+    same synthetic quadratic landscape, same seeds, same metric. No hardcoded
+    comparison values — all numbers are computed fresh.
+    """
+    from src.symbolr.baselines.benchmark import BenchmarkSuite
+
+    console.rule("[bold yellow]SymboLR Benchmark Suite[/bold yellow]")
+    console.print(f"Formula : [bold magenta]{formula}[/bold magenta]")
+    console.print(f"Seeds   : {seeds}  |  Steps: {steps}  |  Base seed: {base_seed}\n")
+
+    baseline_list = [b.strip() for b in baselines.split(",") if b.strip()] or None
+
+    suite = BenchmarkSuite(time_steps=steps, n_seeds=seeds, base_seed=base_seed)
+
+    with console.status("[dim]Running benchmark...[/dim]"):
+        try:
+            result = suite.compare(formula, baseline_names=baseline_list)
+        except Exception as exc:
+            console.print(f"[bold red]Benchmark error:[/bold red] {exc}")
+            raise typer.Exit(1)
+
+    # ── Results table ─────────────────────────────────────────────────────────
+    from rich.table import Table
+    from rich.text import Text
+
+    table = Table(
+        title=f"Benchmark: [magenta]{formula}[/magenta]",
+        show_lines=True,
+        header_style="bold",
     )
+    table.add_column("Candidate",    style="cyan",   min_width=20)
+    table.add_column("Mean Fitness", justify="right", style="green")
+    table.add_column("Std",          justify="right", style="dim")
+    table.add_column("Δ vs Formula", justify="right")
+    table.add_column("Win Rate",     justify="right")
+    table.add_column("95% CI",       justify="right", style="dim")
+    table.add_column("p-value",      justify="right")
+
+    ft = result.formula_trial
+    table.add_row(
+        Text(f"★ Formula", style="bold magenta"),
+        f"{ft.mean:.5f}",
+        f"±{ft.std:.5f}",
+        "—",
+        "—",
+        "—",
+        "—",
+    )
+
+    for name, cmp in sorted(result.comparisons.items(), key=lambda x: x[1].baseline_mean):
+        bt  = result.baseline_trials[name]
+        win = "✓" if cmp.formula_wins else "✗"
+        delta_style = "green" if cmp.formula_wins else "red"
+        sig_marker  = "*" if cmp.is_significant else (" ?" if cmp.wilcoxon_p is not None else "")
+        p_str = f"{cmp.wilcoxon_p:.3f}{sig_marker}" if cmp.wilcoxon_p is not None else "n/a"
+        table.add_row(
+            name,
+            f"{bt.mean:.5f}",
+            f"±{bt.std:.5f}",
+            Text(f"{win} {cmp.delta_mean:+.5f}", style=delta_style),
+            f"{cmp.win_rate:.0%}",
+            f"[{cmp.ci_lower:+.4f}, {cmp.ci_upper:+.4f}]",
+            p_str,
+        )
+
+    console.print(table)
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    rank_str   = f"[bold]#{result.rank}[/bold] of {result.n_candidates}"
+    beaten_str = f"{result.n_baselines_beaten}/{len(result.baseline_trials)} baselines"
+    console.print(f"\nRanking: {rank_str}  |  Beats: {beaten_str}")
+
+    if seeds < 7 and not SCIPY_AVAILABLE_IN_CLI:
+        console.print(
+            "[dim]Note: use --seeds ≥ 7 for Wilcoxon significance (min p ≈ 0.031).[/dim]"
+        )
+    elif seeds < 7:
+        console.print(
+            "[dim]Note: with --seeds < 7 the Wilcoxon test cannot reach α=0.05 "
+            "(min p ≈ 0.063). Increase --seeds for statistical power.[/dim]"
+        )
+
+    if output:
+        result.save_json(output)
+        console.print(f"[dim]Results saved to {output}[/dim]")
+
+
+# runtime check — used for the note above
+try:
+    from scipy.stats import wilcoxon as _  # noqa: F401
+    SCIPY_AVAILABLE_IN_CLI = True
+except ImportError:
+    SCIPY_AVAILABLE_IN_CLI = False
 
 
 if __name__ == "__main__":

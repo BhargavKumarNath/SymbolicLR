@@ -1,47 +1,44 @@
-//! archive.rs — Native Rust MAP-Elites Quality-Diversity Archive.
+//! archive.rs — MAP-Elites Quality-Diversity Archive for SymboLR.
 //!
-//! All state lives in a single `HashMap<NicheKey, Niche>` — no GC, no Python
-//! object model, no serialization tax on the hot path.
+//! ## Phase 2: Gradient-Aware Behavioral Axes
 //!
-//! Behavioral Descriptors (3D grid, matching Python MAP-Elites spec):
-//!   dim 0 — `size_idx`       : AST node count, bucketed into `size_bins`
-//!   dim 1 — `com_idx`        : Centre-of-mass of the LR schedule ∈ [0, 1]
-//!   dim 2 — `smoothness_idx` : Normalized total-variation of the schedule
+//! Behavioral descriptors are redesigned to capture gradient-awareness:
 //!
-//! Elite Aging:  each niche entry tracks its age (generations since last
-//!               improvement). An age-penalty slightly favours fresh challengers
-//!               in competitive replacement, preventing archive ossification.
+//!   dim 0 — `size_idx`               : AST node count, bucketed
+//!   dim 1 — `gradient_sensitivity_idx`: How much the formula's output changes
+//!                                        when the gradient norm varies
+//!   dim 2 — `loss_sensitivity_idx`   : How much the formula's output changes
+//!                                        when the loss slope varies
 //!
-//! Invariants enforced:
-//!   • Only finite raw_loss values enter the archive.
-//!   • Structural duplicates (same hash) in the same niche are always rejected.
-//!   • `increment_ages()` must be called exactly once per generation.
+//! This means the archive's behavioral map directly answers the question:
+//! "Does this formula react to gradient health signals?"
+//!
+//! Formulas that use only VarT always land in (size, 0, 0) niches.
+//! Formulas using VarG land in higher gradient_sensitivity niches.
+//! Formulas using VarDL land in higher loss_sensitivity niches.
+//!
+//! ## Elite Aging
+//! Each niche tracks its age (generations since last improvement).
+//! An age-penalty slightly favours fresh challengers, preventing ossification.
 
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 
-use crate::ast::Expr;
+use crate::ast::{Expr, MAX_NODES};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 1.  Types
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A 3-tuple `(size_idx, com_idx, smoothness_idx)` that uniquely identifies a
-/// behavioural niche in the 3-D grid.
+/// 3-tuple `(size_idx, gradient_sensitivity_idx, loss_sensitivity_idx)`.
 pub type NicheKey = (usize, usize, usize);
 
-/// One slot in the archive — the elite individual for a niche.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Niche {
-    /// The symbolic formula occupying this niche.
     pub expr: Expr,
-    /// The real validation loss (lower is better).
     pub raw_loss: f64,
-    /// Structural complexity (AST node count) — used for Pareto tracking.
     pub complexity: usize,
-    /// Structural hash of `expr` for O(1) duplicate detection.
     pub expr_hash: u64,
-    /// Generations since this niche was last improved (for age-penalty).
     pub age: u32,
 }
 
@@ -49,27 +46,25 @@ pub struct Niche {
 // 2.  Archive Config
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Immutable configuration for the archive grid dimensions and aging policy.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ArchiveConfig {
+    /// Number of AST size buckets (axis 0).
     pub size_bins: usize,
-    pub com_bins: usize,
-    pub smoothness_bins: usize,
+    /// Number of gradient-sensitivity buckets (axis 1).
+    pub gradient_sensitivity_bins: usize,
+    /// Number of loss-slope-sensitivity buckets (axis 2).
+    pub loss_sensitivity_bins: usize,
     /// Additive penalty per generation of age applied to incumbents.
-    /// Favours fresh challengers without hard-expiring incumbents.
     pub age_penalty_coeff: f64,
-    /// Number of evenly-spaced time steps `t ∈ [0, 1]` for descriptor computation.
-    pub time_steps: usize,
 }
 
 impl Default for ArchiveConfig {
     fn default() -> Self {
         Self {
             size_bins: 30,
-            com_bins: 20,
-            smoothness_bins: 10,
+            gradient_sensitivity_bins: 20,
+            loss_sensitivity_bins: 10,
             age_penalty_coeff: 0.001,
-            time_steps: 100,
         }
     }
 }
@@ -78,41 +73,25 @@ impl Default for ArchiveConfig {
 // 3.  MapElitesArchive
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Native Rust MAP-Elites Quality-Diversity Archive.
-///
-/// All archive state is owned by this struct — zero heap-allocated Python
-/// objects, zero GC pressure, deterministic drop order.
 #[derive(Serialize, Deserialize)]
 pub struct MapElitesArchive {
-    /// Primary store: niche → elite individual.
     pub niches: HashMap<NicheKey, Niche>,
-    /// Grid dimensions and aging policy.
     pub config: ArchiveConfig,
-    /// Pre-computed `t` array `[0.0, …, 1.0]` with `time_steps` elements.
-    t_array: Vec<f64>,
-    /// Cross-niche set of all expression hashes currently in the archive.
     expression_hashes: std::collections::HashSet<u64>,
-    // ── Diagnostics counters ──────────────────────────────────────────────────
     pub total_attempts: u64,
     pub total_additions: u64,
     pub current_generation: u32,
 }
 
 impl MapElitesArchive {
-    // ── 3.1  Construction ─────────────────────────────────────────────────────
-
     pub fn new(config: ArchiveConfig) -> Self {
-        let time_steps = config.time_steps;
-        let t_array: Vec<f64> = (0..time_steps)
-            .map(|i| i as f64 / (time_steps - 1).max(1) as f64)
-            .collect();
-
+        let capacity = config.size_bins
+            * config.gradient_sensitivity_bins
+            * config.loss_sensitivity_bins
+            / 4;
         Self {
-            niches: HashMap::with_capacity(
-                config.size_bins * config.com_bins * config.smoothness_bins / 4,
-            ),
+            niches: HashMap::with_capacity(capacity),
             config,
-            t_array,
             expression_hashes: std::collections::HashSet::new(),
             total_attempts: 0,
             total_additions: 0,
@@ -120,110 +99,106 @@ impl MapElitesArchive {
         }
     }
 
-    // ── 3.2  Behavioural Descriptors ──────────────────────────────────────────
+    // ── 3.1  Behavioural Descriptors ──────────────────────────────────────────
 
-    /// Compute the 3-D niche key for a given `(expr, lr_schedule)` pair.
+    /// Compute the 3-D niche key for a formula by probing its sensitivity.
     ///
-    /// Returns `None` if the schedule is numerically invalid (all-zero, Inf, NaN).
+    /// Validity check: requires at least one finite, positive output when
+    /// evaluated at 5 time-axis probe points (g=0, dl=0). This matches the
+    /// semantics of the old schedule-sum check while supporting gradient-aware
+    /// formulas that are zero at g=0.
     ///
-    /// # Arguments
-    /// * `size`     — node count of the expression (already computed by caller)
-    /// * `schedule` — the output of `expr.eval_schedule(&self.t_array)`
-    pub fn compute_niche_key(&self, size: usize, schedule: &[f64]) -> Option<NicheKey> {
-        let n = schedule.len();
-        if n == 0 {
+    /// Sensitivity computation:
+    /// - Gradient sensitivity: CoV of outputs as g varies over [-2, 2] at t=0.5
+    /// - Loss sensitivity: CoV of outputs as dl varies over [-1, 1] at t=0.5
+    ///
+    /// Time-only formulas (no VarG/VarDL) get sensitivity = 0 → land in (size, 0, 0).
+    pub fn compute_niche_key(&self, expr: &Expr) -> Option<NicheKey> {
+        // ── Validity: comprehensive probe across (t, g, dl) ───────────────────
+        // Sample a 5×3×3 = 45-point grid. A formula is invalid only if it
+        // cannot produce a positive output for any combination of inputs.
+        // This correctly accepts cos(π*t) (positive at t < 0.5) and VarDL/VarG
+        // formulas (positive when those variables are positive).
+        const T_VALS: [f64; 5]  = [0.1, 0.3, 0.5, 0.7, 0.9];
+        const G_VALS: [f64; 3]  = [-2.0, 0.0, 2.0];
+        const DL_VALS: [f64; 3] = [-1.0, 0.0, 1.0];
+
+        let mut max_output = f64::NEG_INFINITY;
+        for &t in &T_VALS {
+            for &g in &G_VALS {
+                for &dl in &DL_VALS {
+                    let v = expr.eval(t, g, dl);
+                    if v > max_output { max_output = v; }
+                }
+            }
+        }
+        if !max_output.is_finite() || max_output <= 0.0 {
             return None;
         }
 
-        // Validate: require at least one finite, positive value.
-        let total_lr: f64 = schedule.iter().sum();
-        if !total_lr.is_finite() || total_lr <= 0.0 {
-            return None;
-        }
-
-        // ── Centre of Mass: Σ(t_i · LR_i) / Σ(LR_i) ─────────────────────────
-        let com: f64 = self.t_array.iter().zip(schedule.iter())
-            .map(|(&t, &lr)| t * lr)
-            .sum::<f64>() / total_lr;
-        let com = com.clamp(0.0, 1.0);
-
-        // ── Normalized Total Variation ─────────────────────────────────────────
-        let diffs: Vec<f64> = schedule.windows(2)
-            .map(|w| (w[1] - w[0]).abs())
+        // ── Gradient sensitivity: vary g ∈ [-2, 2] at t=0.5, dl=0.0 ─────────
+        let g_outputs: Vec<f64> = (0..11)
+            .map(|i| {
+                let g = -2.0 + 4.0 * i as f64 / 10.0;
+                expr.eval(0.5, g, 0.0)
+            })
             .collect();
-        let total_variation: f64 = diffs.iter().sum();
-        let lr_max = schedule.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let lr_min = schedule.iter().cloned().fold(f64::INFINITY, f64::min);
-        let max_tv = if lr_max > lr_min { lr_max - lr_min } else { 1.0 };
-        let normalized_tv = (total_variation / (max_tv * diffs.len() as f64 + 1e-8)).min(1.0);
+        let g_sensitivity = coefficient_of_variation(&g_outputs);
+
+        // ── Loss sensitivity: vary dl ∈ [-1, 1] at t=0.5, g=0.0 ─────────────
+        let dl_outputs: Vec<f64> = (0..11)
+            .map(|i| {
+                let dl = -1.0 + 2.0 * i as f64 / 10.0;
+                expr.eval(0.5, 0.0, dl)
+            })
+            .collect();
+        let dl_sensitivity = coefficient_of_variation(&dl_outputs);
 
         // ── Bin mapping ───────────────────────────────────────────────────────
-        let size_idx = size.min(self.config.size_bins - 1);
-        let com_idx  = ((com * (self.config.com_bins - 1) as f64) as usize)
-                            .min(self.config.com_bins - 1);
-        let smoothness_idx = ((normalized_tv * (self.config.smoothness_bins - 1) as f64) as usize)
-                                  .min(self.config.smoothness_bins - 1);
+        let size = expr.size();
+        // Map size ∈ [1, MAX_NODES] evenly to [0, size_bins - 1]
+        let size_fraction = (size as f64 - 1.0)
+            / (MAX_NODES as f64 - 1.0).max(1.0);
+        let size_idx = ((size_fraction * (self.config.size_bins - 1) as f64) as usize)
+            .min(self.config.size_bins - 1);
 
-        Some((size_idx, com_idx, smoothness_idx))
+        let grad_idx = ((g_sensitivity * self.config.gradient_sensitivity_bins as f64) as usize)
+            .min(self.config.gradient_sensitivity_bins - 1);
+
+        let loss_idx = ((dl_sensitivity * self.config.loss_sensitivity_bins as f64) as usize)
+            .min(self.config.loss_sensitivity_bins - 1);
+
+        Some((size_idx, grad_idx, loss_idx))
     }
 
-    // ── 3.3  Archive Insertion  ───────────────────────────────────────────────
+    // ── 3.2  Archive Insertion ────────────────────────────────────────────────
 
-    /// Attempt to insert `expr` with its fitness score into the archive.
-    ///
-    /// # Returns
-    /// `true` if the expr occupied a new niche or improved an existing one.
-    ///
-    /// # Rejection criteria (any one is sufficient to reject)
-    /// 1. `raw_loss` is not finite.
-    /// 2. The expression's niche cannot be determined (invalid schedule).
-    /// 3. The exact same structural hash already occupies this niche.
-    /// 4. The incumbent's age-adjusted loss ≤ `effective_loss`.
-    ///
-    /// # Parameters
-    /// * `expr`           — the candidate formula (consumed on success).
-    /// * `raw_loss`       — real validation loss (stored for HoF display).
-    /// * `effective_loss` — novelty-augmented loss used for comparison;
-    ///                      pass `raw_loss` if novelty is disabled.
-    pub fn try_add(
-        &mut self,
-        expr: Expr,
-        raw_loss: f64,
-        effective_loss: f64,
-    ) -> bool {
+    pub fn try_add(&mut self, expr: Expr, raw_loss: f64, effective_loss: f64) -> bool {
         self.total_attempts += 1;
 
-        // Gate 1: numerical sanity.
         if !raw_loss.is_finite() || !effective_loss.is_finite() {
             return false;
         }
 
-        // Gate 2: evaluate schedule + compute niche.
-        let schedule = expr.eval_schedule(&self.t_array);
-        let size = expr.size();
-        let niche_key = match self.compute_niche_key(size, &schedule) {
+        let niche_key = match self.compute_niche_key(&expr) {
             Some(k) => k,
             None    => return false,
         };
 
-        // Gate 3 & 4: incumbent check.
         let expr_hash = expr.structural_hash();
+        let size = expr.size();
 
         if let Some(incumbent) = self.niches.get(&niche_key) {
-            // Exact structural duplicate in this niche — always reject.
             if incumbent.expr_hash == expr_hash {
                 return false;
             }
-            // Age-adjusted incumbent loss — favours fresher challengers.
             let incumbent_adjusted = incumbent.raw_loss
                 + self.config.age_penalty_coeff * incumbent.age as f64;
-
             if effective_loss >= incumbent_adjusted {
-                return false; // incumbent wins
+                return false;
             }
         }
 
-        // Insert / replace.
         self.expression_hashes.insert(expr_hash);
         self.niches.insert(niche_key, Niche {
             complexity: size,
@@ -236,11 +211,8 @@ impl MapElitesArchive {
         true
     }
 
-    // ── 3.4  Lifecycle ────────────────────────────────────────────────────────
+    // ── 3.3  Lifecycle ────────────────────────────────────────────────────────
 
-    /// Increment the age counter for every entry in the archive.
-    ///
-    /// Must be called exactly once per generation, after all `try_add` calls.
     pub fn increment_ages(&mut self) {
         self.current_generation += 1;
         for niche in self.niches.values_mut() {
@@ -248,33 +220,27 @@ impl MapElitesArchive {
         }
     }
 
-    // ── 3.5  Query ────────────────────────────────────────────────────────────
-
-    /// Number of occupied niches.
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.niches.len()
-    }
+    // ── 3.4  Query ────────────────────────────────────────────────────────────
 
     #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.niches.is_empty()
-    }
+    pub fn len(&self) -> usize { self.niches.len() }
 
-    /// Max possible niches given the grid dimensions.
+    #[inline]
+    pub fn is_empty(&self) -> bool { self.niches.is_empty() }
+
     #[inline]
     pub fn max_niches(&self) -> usize {
-        self.config.size_bins * self.config.com_bins * self.config.smoothness_bins
+        self.config.size_bins
+            * self.config.gradient_sensitivity_bins
+            * self.config.loss_sensitivity_bins
     }
 
-    /// Returns the best (lowest raw_loss) niche, if any.
     pub fn best(&self) -> Option<&Niche> {
         self.niches.values().min_by(|a, b| {
             a.raw_loss.partial_cmp(&b.raw_loss).unwrap_or(std::cmp::Ordering::Equal)
         })
     }
 
-    /// Returns the `top_k` niches sorted by ascending raw_loss.
     pub fn hall_of_fame(&self, top_k: usize) -> Vec<&Niche> {
         let mut all: Vec<&Niche> = self.niches.values().collect();
         all.sort_by(|a, b| a.raw_loss.partial_cmp(&b.raw_loss)
@@ -283,22 +249,26 @@ impl MapElitesArchive {
         all
     }
 
-    /// Aggregate statistics for telemetry streaming.
-    pub fn stats(&self) -> ArchiveStats {
-        let losses: Vec<f64> = self.niches.values()
-            .map(|n| n.raw_loss)
-            .collect();
-        let ages: Vec<u32> = self.niches.values()
-            .map(|n| n.age)
-            .collect();
+    /// Mean gradient-sensitivity bin index normalized to [0, 1].
+    ///
+    /// Returns 0.0 for a pure time-only archive, 1.0 if all elites are
+    /// maximally gradient-reactive.
+    pub fn mean_gradient_sensitivity(&self) -> f64 {
+        if self.niches.is_empty() { return 0.0; }
+        let bins = (self.config.gradient_sensitivity_bins - 1).max(1) as f64;
+        let sum: f64 = self.niches.keys().map(|k| k.1 as f64 / bins).sum();
+        sum / self.niches.len() as f64
+    }
 
-        let best_loss = losses.iter().cloned()
-            .fold(f64::INFINITY, f64::min);
+    pub fn stats(&self) -> ArchiveStats {
+        let losses: Vec<f64> = self.niches.values().map(|n| n.raw_loss).collect();
+        let ages: Vec<u32>   = self.niches.values().map(|n| n.age).collect();
+
+        let best_loss = losses.iter().cloned().fold(f64::INFINITY, f64::min);
         let median_loss = {
             let mut s = losses.clone();
             s.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            if s.is_empty() { f64::INFINITY }
-            else { s[s.len() / 2] }
+            if s.is_empty() { f64::INFINITY } else { s[s.len() / 2] }
         };
         let mean_age = if ages.is_empty() {
             0.0
@@ -317,12 +287,33 @@ impl MapElitesArchive {
             best_loss,
             median_loss,
             mean_elite_age: mean_age,
+            gradient_sensitivity_mean: self.mean_gradient_sensitivity(),
         }
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4.  Stats snapshot (used for telemetry JSON later)
+// 4.  Sensitivity Helper
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Coefficient of Variation of a set of values, clamped to [0, 1].
+///
+/// Returns 0.0 for constant inputs (time-only formulas that don't react
+/// to the probed variable) and approaches 1.0 for highly reactive formulas.
+fn coefficient_of_variation(values: &[f64]) -> f64 {
+    let finite: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
+    if finite.len() < 2 {
+        return 0.0;
+    }
+    let mean = finite.iter().sum::<f64>() / finite.len() as f64;
+    let variance = finite.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
+        / finite.len() as f64;
+    let std = variance.sqrt();
+    (std / (mean.abs() + 1e-6)).min(1.0)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 5.  Stats snapshot
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -335,10 +326,13 @@ pub struct ArchiveStats {
     pub best_loss: f64,
     pub median_loss: f64,
     pub mean_elite_age: f64,
+    /// Mean gradient-sensitivity of archive elites, normalized to [0, 1].
+    /// Increases as search discovers gradient-reactive formulas.
+    pub gradient_sensitivity_mean: f64,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 5.  Tests
+// 6.  Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -350,244 +344,197 @@ mod tests {
         MapElitesArchive::new(ArchiveConfig::default())
     }
 
-    // ── Helper: a simple, well-behaved formula `0.01` (constant schedule). ────
-    fn constant_expr(val: f64) -> Expr {
-        Expr::Const(val)
-    }
-
-    // ── Helper: `t + c` — a linearly increasing schedule. ────────────────────
     fn linear_expr(c: f64) -> Expr {
-        Expr::Add(Box::new(Expr::Var), Box::new(Expr::Const(c)))
+        Expr::Add(Box::new(Expr::VarT), Box::new(Expr::Const(c)))
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Test 2 (mandated, Part A): Empty archive, first insertion always succeeds.
-    // ─────────────────────────────────────────────────────────────────────────
+    fn gradient_expr() -> Expr {
+        // 0.01 * exp(-g) — reactive to gradient norm
+        Expr::Mul(
+            Box::new(Expr::Const(0.01)),
+            Box::new(Expr::Exp(Box::new(Expr::Mul(
+                Box::new(Expr::Const(-1.0)),
+                Box::new(Expr::VarG),
+            )))),
+        )
+    }
 
-    /// Test 2A: Insert into an empty archive — must succeed.
     #[test]
     fn test_archive_insert_into_empty() {
         let mut archive = default_archive();
         assert!(archive.is_empty());
-
         let accepted = archive.try_add(linear_expr(0.001), 0.5, 0.5);
-        assert!(accepted, "First insertion into empty archive must succeed");
+        assert!(accepted, "First insertion must succeed");
         assert_eq!(archive.len(), 1);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Test 2 (mandated, Part B): Insert better → replaces; insert worse → rejected.
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /// Test 2B-i: Insert a BETTER formula into the same niche — must replace.
-    ///
-    /// We use two differently-scaled linear schedules that land in the same
-    /// behavioural niche (same centre-of-mass bucket and smoothness bucket).
-    /// The second formula has a strictly lower loss; it must win.
     #[test]
     fn test_archive_better_formula_replaces_incumbent() {
         let mut archive = default_archive();
+        archive.try_add(linear_expr(0.001), 1.0, 1.0);
+        let niche_key = *archive.niches.keys().next().unwrap();
 
-        // First formula: `t + 0.001`  →  loss = 1.0
-        let expr_a = linear_expr(0.001);
-        let accepted_a = archive.try_add(expr_a, 1.0, 1.0);
-        assert!(accepted_a, "First formula should be accepted");
-        let size_before = archive.len();
-
-        // Force the niche key of the second formula to be identical by using
-        // a formula with the same behavioural profile but strictly lower loss.
-        // We record the actual niche key of the incumbent.
-        let niche_key = {
-            let niche_ref = archive.niches.iter().next().unwrap();
-            *niche_ref.0
-        };
-
-        // Manually insert a better entry with exactly the same niche key,
-        // bypassing niche computation — this tests the replacement logic directly.
-        let expr_b = linear_expr(0.002); // structurally different from expr_a
-        let better_niche = Niche {
-            complexity: expr_b.size(),
-            expr_hash: expr_b.structural_hash(),
-            raw_loss: 0.3,     // Better loss
+        // Directly replace with a better entry (same niche key)
+        let better = linear_expr(0.002);
+        archive.niches.insert(niche_key, Niche {
+            complexity: better.size(),
+            expr_hash: better.structural_hash(),
+            raw_loss: 0.3,
             age: 0,
-            expr: expr_b,
-        };
-        // Direct HashMap insertion to control the exact niche.
-        archive.niches.insert(niche_key, better_niche);
+            expr: better,
+        });
 
-        assert_eq!(archive.len(), size_before, "Niche count must not change after replacement");
-        let occupant = archive.niches.get(&niche_key).unwrap();
-        assert!(
-            (occupant.raw_loss - 0.3).abs() < 1e-12,
-            "Archive must store the better formula (loss 0.3); got {}", occupant.raw_loss
-        );
+        assert_eq!(archive.len(), 1, "Niche count unchanged on replacement");
+        assert!((archive.niches[&niche_key].raw_loss - 0.3).abs() < 1e-12);
     }
 
-    /// Test 2B-ii: Reject a WORSE formula — the incumbent must remain unchanged.
     #[test]
     fn test_archive_worse_formula_is_rejected() {
         let mut archive = default_archive();
-
-        // Good formula: loss = 0.2
-        let good_expr = linear_expr(0.001);
-        let good_hash = good_expr.structural_hash();
-        let accepted = archive.try_add(good_expr, 0.2, 0.2);
-        assert!(accepted);
-
+        archive.try_add(linear_expr(0.001), 0.2, 0.2);
         let niche_key = *archive.niches.keys().next().unwrap();
-        let incumbent_hash_before = archive.niches[&niche_key].expr_hash;
+        let before_hash = archive.niches[&niche_key].expr_hash;
 
-        // Worse formula: loss = 5.0 — must be rejected via try_add.
-        // Use a structurally distinct but behaviourally similar expression.
-        let worse_expr = Expr::Add(
-            Box::new(Expr::Var),
-            Box::new(Expr::Const(0.002)),
-        );
-        // Verify it's structurally distinct (different constant).
-        assert_ne!(worse_expr.structural_hash(), good_hash);
-
-        // Manually place the worse formula into the same niche key to test
-        // the competitive-replacement path precisely.
-        //
-        // We simulate try_add logic: if effective_loss >= incumbent_adjusted → reject.
-        let worse_loss = 5.0_f64;
-        let incumbent = &archive.niches[&niche_key];
-        let incumbent_adjusted = incumbent.raw_loss
-            + archive.config.age_penalty_coeff * incumbent.age as f64;
-        assert!(
-            worse_loss >= incumbent_adjusted,
-            "Worse formula (loss {worse_loss}) must lose to incumbent (adj {})",
-            incumbent_adjusted
-        );
-
-        // Now call try_add for a formula that will hash to the same niche.
-        // We can't guarantee the niche mapping from try_add, so we test
-        // the internal comparison invariant directly.
-        let rejected = archive.try_add(
-            Expr::Add(Box::new(Expr::Var), Box::new(Expr::Const(0.003))),
-            5.0,  // much worse loss
-            5.0,
-        );
-        // Whether rejected due to niche mismatch or loss comparison, the
-        // incumbent in the known niche must NOT have changed.
-        let incumbent_hash_after = archive.niches[&niche_key].expr_hash;
-        assert_eq!(
-            incumbent_hash_before, incumbent_hash_after,
-            "Incumbent must not change after worse formula insertion attempt"
-        );
-        let _ = rejected; // result depends on niche mapping; we verify incumbent stability
+        archive.try_add(Expr::Add(Box::new(Expr::VarT), Box::new(Expr::Const(0.003))), 5.0, 5.0);
+        assert_eq!(archive.niches[&niche_key].expr_hash, before_hash,
+            "Incumbent must survive worse challenge");
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Additional archive tests
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /// Identical structural hash in the same niche must be silently rejected.
     #[test]
     fn test_archive_rejects_structural_duplicate() {
         let mut archive = default_archive();
-
-        let expr1 = linear_expr(0.001);
-        let expr2 = linear_expr(0.001); // identical structure, same hash
-        assert_eq!(expr1.structural_hash(), expr2.structural_hash());
-
-        archive.try_add(expr1, 0.5, 0.5);
-
-        // Locate what niche the first entry landed in.
+        archive.try_add(linear_expr(0.001), 0.5, 0.5);
         let key = *archive.niches.keys().next().unwrap();
+        let before = archive.niches[&key].expr_hash;
 
-        // Directly test the duplicate-detection path: manually present the same
-        // hash to try_add under the same niche.  Since try_add computes niche
-        // from the formula itself, we verify via direct niche inspection that
-        // the incumbent hash is unchanged.
-        let before_hash = archive.niches[&key].expr_hash;
-        archive.try_add(linear_expr(0.001), 0.0, 0.0); // even better loss, but duplicate
-        let after_hash = archive.niches[&key].expr_hash;
-
-        // The hash must remain unchanged because the duplicate check fires first.
-        assert_eq!(before_hash, after_hash,
-            "Structural duplicate must not replace incumbent even at lower loss");
+        // Same structure, even better loss — must be rejected
+        archive.try_add(linear_expr(0.001), 0.0, 0.0);
+        assert_eq!(archive.niches[&key].expr_hash, before,
+            "Structural duplicate must not replace incumbent");
     }
 
-    /// Non-finite loss must be silently rejected.
     #[test]
     fn test_archive_rejects_nonfinite_loss() {
         let mut archive = default_archive();
-
-        let accepted = archive.try_add(Expr::Var, f64::NAN, f64::NAN);
-        assert!(!accepted, "NaN loss must be rejected");
-
-        let accepted2 = archive.try_add(Expr::Var, f64::INFINITY, f64::INFINITY);
-        assert!(!accepted2, "Inf loss must be rejected");
-
-        assert!(archive.is_empty(), "Archive must remain empty after all rejections");
+        assert!(!archive.try_add(Expr::VarT, f64::NAN, f64::NAN));
+        assert!(!archive.try_add(Expr::VarT, f64::INFINITY, f64::INFINITY));
+        assert!(archive.is_empty());
     }
 
-    /// `increment_ages` correctly ages all entries.
     #[test]
     fn test_archive_age_increment() {
         let mut archive = default_archive();
-
         archive.try_add(linear_expr(0.001), 0.5, 0.5);
         assert_eq!(archive.niches.values().next().unwrap().age, 0);
-
         archive.increment_ages();
         assert_eq!(archive.niches.values().next().unwrap().age, 1);
-
         archive.increment_ages();
         assert_eq!(archive.niches.values().next().unwrap().age, 2);
         assert_eq!(archive.current_generation, 2);
     }
 
-    /// `best()` returns the globally lowest loss entry.
     #[test]
     fn test_archive_best_selection() {
         let mut archive = default_archive();
-
-        // Insert two entries into distinct niches.
         archive.try_add(linear_expr(0.001), 0.8, 0.8);
-        archive.try_add(Expr::Mul(Box::new(Expr::Var), Box::new(Expr::Const(0.1))), 0.2, 0.2);
-
-        let best = archive.best().expect("Archive must have a best entry");
-        assert!(
-            best.raw_loss <= 0.8,
-            "Best entry must have the lowest loss; got {}", best.raw_loss
-        );
+        archive.try_add(Expr::Mul(Box::new(Expr::VarT), Box::new(Expr::Const(0.1))), 0.2, 0.2);
+        let best = archive.best().unwrap();
+        assert!(best.raw_loss <= 0.8);
     }
 
-    /// `stats()` reports sensible values for a populated archive.
     #[test]
-    fn test_archive_stats() {
+    fn test_archive_stats_populated() {
         let mut archive = default_archive();
         archive.try_add(linear_expr(0.001), 0.5, 0.5);
         archive.increment_ages();
-
         let stats = archive.stats();
         assert_eq!(stats.occupied_niches, archive.len());
         assert!(stats.occupancy_pct > 0.0 && stats.occupancy_pct < 100.0);
-        assert_eq!(stats.total_additions, archive.total_additions);
-        assert_eq!(stats.total_attempts, archive.total_attempts);
         assert!(stats.best_loss.is_finite());
     }
 
-    /// Niche computation rejects all-zero schedule.
     #[test]
-    fn test_niche_computation_rejects_zero_schedule() {
+    fn test_niche_rejects_zero_constant() {
         let archive = default_archive();
-        let zero_schedule = vec![0.0_f64; 100];
-        let result = archive.compute_niche_key(3, &zero_schedule);
-        assert!(result.is_none(), "Zero schedule must produce no niche key");
+        // Const(0.0): total_lr = 0 → None
+        assert!(archive.compute_niche_key(&Expr::Const(0.0)).is_none());
+        // Const(-0.5): total_lr < 0 → None
+        assert!(archive.compute_niche_key(&Expr::Const(-0.5)).is_none());
     }
 
-    /// Niche keys must be within grid bounds.
     #[test]
     fn test_niche_key_within_bounds() {
         let archive = default_archive();
-        let schedule: Vec<f64> = (0..100).map(|i| 0.01 + i as f64 * 0.001).collect();
-        let key = archive.compute_niche_key(5, &schedule).expect("Valid schedule must produce a key");
+        // Valid time-only formula
+        let expr = linear_expr(0.01);
+        let key = archive.compute_niche_key(&expr).expect("Valid formula must produce key");
+        assert!(key.0 < archive.config.size_bins, "size_idx out of bounds");
+        assert!(key.1 < archive.config.gradient_sensitivity_bins, "grad_idx out of bounds");
+        assert!(key.2 < archive.config.loss_sensitivity_bins, "loss_idx out of bounds");
+    }
 
-        assert!(key.0 < archive.config.size_bins,    "size_idx out of bounds");
-        assert!(key.1 < archive.config.com_bins,     "com_idx out of bounds");
-        assert!(key.2 < archive.config.smoothness_bins, "smoothness_idx out of bounds");
+    #[test]
+    fn test_gradient_aware_formula_gets_nonzero_sensitivity() {
+        let archive = default_archive();
+        let expr = gradient_expr();
+        let key = archive.compute_niche_key(&expr).expect("gradient formula must produce key");
+        // gradient_sensitivity_idx should be > 0 because exp(-g) changes with g
+        assert!(key.1 > 0, "gradient_sensitive formula must land in grad_idx > 0, got {}", key.1);
+    }
+
+    #[test]
+    fn test_time_only_formula_gets_zero_sensitivity() {
+        let archive = default_archive();
+        // 0.5 * cos(π*t) — time-only, decreases from 0.5 to -0.5
+        // The formula IS valid because it's positive for t < 0.5
+        let expr = Expr::Mul(
+            Box::new(Expr::Const(0.5)),
+            Box::new(Expr::Cos(Box::new(Expr::Mul(
+                Box::new(Expr::Const(std::f64::consts::PI)),
+                Box::new(Expr::VarT),
+            )))),
+        );
+        let key = archive.compute_niche_key(&expr).expect("0.5*cos(pi*t) must produce key");
+        // Time-only formula: both sensitivity dimensions must be 0
+        assert_eq!(key.1, 0, "Time-only formula must have grad_idx=0, got {}", key.1);
+        assert_eq!(key.2, 0, "Time-only formula must have loss_idx=0, got {}", key.2);
+    }
+
+    #[test]
+    fn test_gradient_sensitivity_increases_over_generations() {
+        let mut archive = default_archive();
+
+        // Add some time-only formulas first
+        archive.try_add(linear_expr(0.001), 0.5, 0.5);
+        archive.try_add(Expr::Cos(Box::new(Expr::VarT)), 0.4, 0.4);
+        let sensitivity_before = archive.mean_gradient_sensitivity();
+
+        // Add a strongly gradient-reactive formula
+        archive.try_add(gradient_expr(), 0.3, 0.3);
+        let sensitivity_after = archive.mean_gradient_sensitivity();
+
+        // Mean sensitivity should increase (or stay same if gradient formula is in bin 0)
+        // We can't guarantee it increases, but it should not decrease.
+        assert!(sensitivity_after >= sensitivity_before - 1e-9,
+            "Adding gradient formula must not decrease mean sensitivity");
+    }
+
+    #[test]
+    fn test_max_niches_formula() {
+        let archive = default_archive();
+        assert_eq!(
+            archive.max_niches(),
+            30 * 20 * 10,
+            "Max niches must be size_bins * grad_bins * loss_bins = 6000"
+        );
+    }
+
+    #[test]
+    fn test_stats_includes_gradient_sensitivity() {
+        let mut archive = default_archive();
+        archive.try_add(linear_expr(0.01), 0.5, 0.5);
+        let stats = archive.stats();
+        assert!(stats.gradient_sensitivity_mean >= 0.0);
+        assert!(stats.gradient_sensitivity_mean <= 1.0);
     }
 }

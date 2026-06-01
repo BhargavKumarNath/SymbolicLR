@@ -41,7 +41,7 @@ pub(crate) fn all_paths(expr: &Expr) -> Vec<Path> {
 fn collect_paths_rec(expr: &Expr, current: &[u8], out: &mut Vec<Path>) {
     out.push(current.to_vec());
     match expr {
-        Expr::Var | Expr::Const(_) => {} // terminals: no children
+        Expr::VarT | Expr::VarG | Expr::VarDL | Expr::Const(_) => {} // terminals: no children
         Expr::Sin(a) | Expr::Cos(a) | Expr::Exp(a)
         | Expr::Log(a) | Expr::Sqrt(a) | Expr::Abs(a) => {
             let mut p = current.to_vec();
@@ -141,12 +141,23 @@ pub fn generate_tree<R: Rng>(depth_remaining: usize, rng: &mut R) -> Expr {
     }
 }
 
+/// Sample a random terminal from the expanded variable set.
+///
+/// Terminal probabilities (Phase 2):
+///   VarT  25% — normalized time (primary signal, most formulas use it)
+///   VarG  15% — log-gradient norm (secondary signal)
+///   VarDL 10% — loss slope (tertiary signal)
+///   Const 50% — numeric constant (needed for scaling)
 #[inline]
 fn random_terminal<R: Rng>(rng: &mut R) -> Expr {
-    if rng.gen_bool(0.5) {
-        Expr::Var
+    let roll = rng.gen::<f64>();
+    if roll < 0.25 {
+        Expr::VarT
+    } else if roll < 0.40 {
+        Expr::VarG
+    } else if roll < 0.50 {
+        Expr::VarDL
     } else {
-        // Constants skewed towards small positives (practical learning-rate range).
         let c: f64 = rng.gen_range(-2.0_f64..=2.0);
         Expr::Const(c)
     }
@@ -261,7 +272,7 @@ pub fn hoist_mutation<R: Rng>(parent: &Expr, rng: &mut R) -> Expr {
 
     // Collect internal node paths (have at least one child).
     let internal: Vec<&Path> = all.iter()
-        .filter(|p| !matches!(get_subtree(parent, p), Expr::Var | Expr::Const(_)))
+        .filter(|p| !matches!(get_subtree(parent, p), Expr::VarT | Expr::VarG | Expr::VarDL | Expr::Const(_)))
         .collect();
 
     if internal.is_empty() {
@@ -297,12 +308,11 @@ pub fn point_mutation<R: Rng>(parent: &Expr, rng: &mut R) -> Expr {
     let target = get_subtree(parent, &target_path);
 
     let replacement = match target {
-        // Terminal → random different terminal
-        Expr::Var => {
-            if rng.gen_bool(0.7) { Expr::Var } else { Expr::Const(rng.gen_range(-2.0_f64..=2.0)) }
-        }
+        // Variable terminals → sample a new random terminal (may stay same or change)
+        Expr::VarT | Expr::VarG | Expr::VarDL => random_terminal(rng),
+        // Const → 30% chance of switching to a variable terminal, else perturb constant
         Expr::Const(_) => {
-            if rng.gen_bool(0.3) { Expr::Var } else { Expr::Const(rng.gen_range(-2.0_f64..=2.0)) }
+            if rng.gen_bool(0.3) { random_terminal(rng) } else { Expr::Const(rng.gen_range(-2.0_f64..=2.0)) }
         }
         // Binary op → different binary op (same arity = same children)
         Expr::Add(a, b) | Expr::Sub(a, b)
@@ -438,7 +448,7 @@ mod tests {
         for _ in 0..50 {
             let tree = generate_tree(0, &mut rng);
             assert!(
-                matches!(tree, Expr::Var | Expr::Const(_)),
+                matches!(tree, Expr::VarT | Expr::VarG | Expr::VarDL | Expr::Const(_)),
                 "depth_remaining=0 must always produce a terminal"
             );
         }
@@ -458,10 +468,9 @@ mod tests {
 
     #[test]
     fn test_all_paths_count_equals_size() {
-        // Number of paths must equal the number of nodes.
         let tree = Expr::Mul(
-            Box::new(Expr::Add(Box::new(Expr::Var), Box::new(Expr::Const(0.5)))),
-            Box::new(Expr::Exp(Box::new(Expr::Var))),
+            Box::new(Expr::Add(Box::new(Expr::VarT), Box::new(Expr::Const(0.5)))),
+            Box::new(Expr::Exp(Box::new(Expr::VarT))),
         );
         assert_eq!(all_paths(&tree).len(), tree.size(),
             "all_paths must yield exactly one path per node");
@@ -470,19 +479,17 @@ mod tests {
     #[test]
     fn test_get_and_replace_roundtrip() {
         let tree = Expr::Add(
-            Box::new(Expr::Var),
+            Box::new(Expr::VarT),
             Box::new(Expr::Const(0.5)),
         );
-        // Replace right child (path [1]) with Const(2.0).
         let new_tree = replace_subtree(tree.clone(), &[1], Expr::Const(2.0));
         let right = get_subtree(&new_tree, &[1]);
         assert!(
             matches!(right, Expr::Const(v) if (*v - 2.0).abs() < 1e-12),
             "Right child must be Const(2.0) after replacement"
         );
-        // Left child must be unchanged.
         let left = get_subtree(&new_tree, &[0]);
-        assert!(matches!(left, Expr::Var), "Left child must remain Var");
+        assert!(matches!(left, Expr::VarT), "Left child must remain VarT");
     }
 
     // ── 7.3  O(1) Hard-Cap Pruning ───────────────────────────────────────────
@@ -568,8 +575,7 @@ mod tests {
     #[test]
     fn test_constant_perturbation_preserves_size() {
         let mut rng = seeded();
-        // Tree with at least one constant.
-        let parent = Expr::Add(Box::new(Expr::Var), Box::new(Expr::Const(0.5)));
+        let parent = Expr::Add(Box::new(Expr::VarT), Box::new(Expr::Const(0.5)));
         let original_size = parent.size();
 
         for _ in 0..50 {
@@ -583,7 +589,7 @@ mod tests {
     #[test]
     fn test_constant_perturbation_modifies_value() {
         let mut rng = SmallRng::seed_from_u64(99);
-        let parent = Expr::Add(Box::new(Expr::Var), Box::new(Expr::Const(1.0)));
+        let parent = Expr::Add(Box::new(Expr::VarT), Box::new(Expr::Const(1.0)));
 
         let offspring = constant_perturbation(&parent, 0.5, &mut rng);
         let new_val = match get_subtree(&offspring, &[1]) {

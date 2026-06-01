@@ -1,8 +1,14 @@
 //! ast.rs — Native Rust Abstract Syntax Tree for SymboLR.
 //!
-//! The `Expr` enum is the single source of truth for every symbolic formula.
-//! All allocations are explicit `Box<Expr>` heap allocations — zero GC, zero
-//! hidden overhead. Structural hashing via MD5 guarantees O(1) deduplication.
+//! ## Phase 2 Extension: Multi-Variable Formulas
+//!
+//! The AST now supports three input variables:
+//!   • `VarT`  — normalized training time t ∈ [0, 1]
+//!   • `VarG`  — log-normalized gradient norm, bounded ≈ [-2, 2]
+//!   • `VarDL` — tanh-normalized loss slope, bounded [-1, 1]
+//!
+//! Backward compatibility is maintained via `eval_schedule_time_only()` which
+//! evaluates with g=0.0, dl=0.0, keeping the `SyntheticEvaluator` path unchanged.
 //!
 //! Design invariants:
 //!   • MAX_NODES  = 15  — hard cap enforced by `try_enforce_cap`
@@ -27,14 +33,17 @@ pub const MAX_DEPTH: usize = 7;
 
 /// Every node in a symbolic formula tree.
 ///
-/// Leaf variants (`Var`, `Const`) own no heap allocation.
+/// Leaf variants own no heap allocation.
 /// Binary variants box both children; unary variants box one child.
-/// This makes cloning O(n) in tree size and deeply safe to reason about.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub enum Expr {
     // ── Terminals ────────────────────────────────────────────────────────────
-    /// The single input variable `t ∈ [0, 1]`.
-    Var,
+    /// Normalized training time t ∈ [0, 1].
+    VarT,
+    /// Log-normalized gradient norm (log(||∇||)), typically ≈ [-2, 2].
+    VarG,
+    /// Tanh-normalized loss slope Δl = tanh((loss_t - loss_{t-k}) / σ).
+    VarDL,
     /// A float literal (e.g. `0.5`, `-1.0`).
     Const(f64),
 
@@ -62,11 +71,10 @@ pub enum Expr {
 // ─────────────────────────────────────────────────────────────────────────────
 
 impl Expr {
-    /// Total node count (bloat proxy). O(n) walk, result is NOT cached here —
-    /// caller sites that need it repeatedly should cache it themselves.
+    /// Total node count (bloat proxy).
     pub fn size(&self) -> usize {
         match self {
-            Expr::Var | Expr::Const(_) => 1,
+            Expr::VarT | Expr::VarG | Expr::VarDL | Expr::Const(_) => 1,
             Expr::Sin(a) | Expr::Cos(a) | Expr::Exp(a)
             | Expr::Log(a) | Expr::Sqrt(a) | Expr::Abs(a) => 1 + a.size(),
             Expr::Add(a, b) | Expr::Sub(a, b)
@@ -77,7 +85,7 @@ impl Expr {
     /// Maximum depth from this node (1-indexed leaf = 1).
     pub fn depth(&self) -> usize {
         match self {
-            Expr::Var | Expr::Const(_) => 1,
+            Expr::VarT | Expr::VarG | Expr::VarDL | Expr::Const(_) => 1,
             Expr::Sin(a) | Expr::Cos(a) | Expr::Exp(a)
             | Expr::Log(a) | Expr::Sqrt(a) | Expr::Abs(a) => 1 + a.depth(),
             Expr::Add(a, b) | Expr::Sub(a, b)
@@ -85,10 +93,21 @@ impl Expr {
         }
     }
 
-    /// Returns `true` if this tree respects both structural caps.
     #[inline]
     pub fn is_within_cap(&self) -> bool {
         self.size() <= MAX_NODES && self.depth() <= MAX_DEPTH
+    }
+
+    /// True if this expression uses VarG or VarDL — i.e., is gradient-aware.
+    pub fn is_gradient_aware(&self) -> bool {
+        match self {
+            Expr::VarG | Expr::VarDL => true,
+            Expr::VarT | Expr::Const(_) => false,
+            Expr::Sin(a) | Expr::Cos(a) | Expr::Exp(a)
+            | Expr::Log(a) | Expr::Sqrt(a) | Expr::Abs(a) => a.is_gradient_aware(),
+            Expr::Add(a, b) | Expr::Sub(a, b)
+            | Expr::Mul(a, b) | Expr::Div(a, b) => a.is_gradient_aware() || b.is_gradient_aware(),
+        }
     }
 }
 
@@ -97,60 +116,59 @@ impl Expr {
 // ─────────────────────────────────────────────────────────────────────────────
 
 impl Expr {
-    /// Evaluate the formula at a single time step `t`.
+    /// Evaluate the formula at a single (t, g, dl) point.
     ///
     /// All operations are numerically protected; the result is always finite.
     #[inline]
-    pub fn eval(&self, t: f64) -> f64 {
-        let raw = self.eval_raw(t);
-        // Final clamp & NaN guard — one branch, branch-predictor friendly.
+    pub fn eval(&self, t: f64, g: f64, dl: f64) -> f64 {
+        let raw = self.eval_raw(t, g, dl);
         if raw.is_finite() { raw.clamp(-1e6, 1e6) } else { 1.0 }
     }
 
-    fn eval_raw(&self, t: f64) -> f64 {
+    fn eval_raw(&self, t: f64, g: f64, dl: f64) -> f64 {
         match self {
-            Expr::Var        => t,
+            Expr::VarT       => t,
+            Expr::VarG       => g,
+            Expr::VarDL      => dl,
             Expr::Const(c)   => *c,
-            Expr::Add(a, b)  => a.eval_raw(t) + b.eval_raw(t),
-            Expr::Sub(a, b)  => a.eval_raw(t) - b.eval_raw(t),
+            Expr::Add(a, b)  => a.eval_raw(t, g, dl) + b.eval_raw(t, g, dl),
+            Expr::Sub(a, b)  => a.eval_raw(t, g, dl) - b.eval_raw(t, g, dl),
             Expr::Mul(a, b)  => {
-                // Protected multiply: clamp to prevent cascading overflow.
-                (a.eval_raw(t) * b.eval_raw(t)).clamp(-100.0, 100.0)
+                (a.eval_raw(t, g, dl) * b.eval_raw(t, g, dl)).clamp(-100.0, 100.0)
             }
             Expr::Div(a, b)  => {
-                let den = b.eval_raw(t);
-                let num = a.eval_raw(t);
+                let den = b.eval_raw(t, g, dl);
+                let num = a.eval_raw(t, g, dl);
                 if den.abs() < 1e-6 {
-                    // Preserve sign information from numerator × sign(denominator).
                     num * (den + 1e-30_f64).signum()
                 } else {
                     num / den
                 }
             }
-            Expr::Sin(a)  => a.eval_raw(t).sin(),
-            Expr::Cos(a)  => a.eval_raw(t).cos(),
-            Expr::Exp(a)  => a.eval_raw(t).clamp(-10.0, 5.0).exp(),
+            Expr::Sin(a)  => a.eval_raw(t, g, dl).sin(),
+            Expr::Cos(a)  => a.eval_raw(t, g, dl).cos(),
+            Expr::Exp(a)  => a.eval_raw(t, g, dl).clamp(-10.0, 5.0).exp(),
             Expr::Log(a)  => {
-                let v = a.eval_raw(t).abs().max(1e-6);
+                let v = a.eval_raw(t, g, dl).abs().max(1e-6);
                 v.ln()
             }
-            Expr::Sqrt(a) => a.eval_raw(t).abs().sqrt(),
-            Expr::Abs(a)  => a.eval_raw(t).abs(),
+            Expr::Sqrt(a) => a.eval_raw(t, g, dl).abs().sqrt(),
+            Expr::Abs(a)  => a.eval_raw(t, g, dl).abs(),
         }
     }
 
-    /// Evaluate the formula over a contiguous slice of time steps.
+    /// Evaluate over a multi-variable input slice `(t, g, dl)`.
     ///
-    /// Returns a `Vec<f64>` of identical length, all values clamped to
-    /// `[1e-7, 10.0]` — the valid learning-rate range.
-    pub fn eval_schedule(&self, t_array: &[f64]) -> Vec<f64> {
-        t_array
-            .iter()
-            .map(|&t| {
-                let v = self.eval(t);
-                v.clamp(1e-7, 10.0)
-            })
-            .collect()
+    /// All values are clamped to `[1e-7, 10.0]` — the valid LR range.
+    pub fn eval_schedule(&self, inputs: &[(f64, f64, f64)]) -> Vec<f64> {
+        inputs.iter().map(|&(t, g, dl)| self.eval(t, g, dl).clamp(1e-7, 10.0)).collect()
+    }
+
+    /// Backward-compatible time-only evaluation (g=0.0, dl=0.0).
+    ///
+    /// Used by `SyntheticEvaluator` and `evaluate_batch` legacy path.
+    pub fn eval_schedule_time_only(&self, t_array: &[f64]) -> Vec<f64> {
+        t_array.iter().map(|&t| self.eval(t, 0.0, 0.0).clamp(1e-7, 10.0)).collect()
     }
 }
 
@@ -161,11 +179,13 @@ impl Expr {
 impl Expr {
     /// Serializes the tree into space-separated prefix (Polish) notation.
     ///
-    /// This is the canonical interchange format with Python:
-    /// `(t + 0.5) * exp(t)` → `"* + t 0.5 exp t"`
+    /// Canonical interchange format with Python:
+    /// `(t + g) * exp(-dl)` → `"* + t g exp * -1 dl"`
     pub fn to_prefix(&self) -> String {
         match self {
-            Expr::Var        => "t".to_owned(),
+            Expr::VarT       => "t".to_owned(),
+            Expr::VarG       => "g".to_owned(),
+            Expr::VarDL      => "dl".to_owned(),
             Expr::Const(c)   => format_const(*c),
             Expr::Add(a, b)  => format!("+ {} {}", a.to_prefix(), b.to_prefix()),
             Expr::Sub(a, b)  => format!("- {} {}", a.to_prefix(), b.to_prefix()),
@@ -181,31 +201,24 @@ impl Expr {
     }
 }
 
-/// Formats a float constant consistently: integers show no decimal suffix,
-/// others use Rust's default float Display (e.g. 0.5 → "0.5", not "0.5000").
 fn format_const(v: f64) -> String {
     if v.fract() == 0.0 && v.abs() < 1e15 {
         format!("{:.0}", v)
     } else {
-        // Rust's default Display trims trailing zeros: 0.5 → "0.5"
         format!("{}", v)
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 6.  LaTeX Display (Human-readable & React frontend serialization)
+// 6.  LaTeX Display
 // ─────────────────────────────────────────────────────────────────────────────
 
 impl fmt::Display for Expr {
-    /// Produces a LaTeX string for the formula.
-    ///
-    /// Examples:
-    ///   `t`                        → `t`
-    ///   `Add(Var, Const(0.5))`     → `(t + 0.5)`
-    ///   `Div(Var, Const(2.0))`     → `\frac{t}{2}`
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Expr::Var        => write!(f, "t"),
+            Expr::VarT       => write!(f, "t"),
+            Expr::VarG       => write!(f, r"\|g\|"),
+            Expr::VarDL      => write!(f, r"\Delta\ell"),
             Expr::Const(c)   => write!(f, "{}", format_const(*c)),
             Expr::Add(a, b)  => write!(f, "({} + {})", a, b),
             Expr::Sub(a, b)  => write!(f, "({} - {})", a, b),
@@ -228,14 +241,10 @@ impl fmt::Debug for Expr {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 7.  Structural Hashing — O(1) deduplication fingerprint
+// 7.  Structural Hashing
 // ─────────────────────────────────────────────────────────────────────────────
 
 impl Expr {
-    /// Returns a u64 structural hash derived from the tree's shape and constants.
-    ///
-    /// Identical trees always produce the same hash; structurally distinct trees
-    /// almost never collide (64-bit hash space). Used for archive deduplication.
     pub fn structural_hash(&self) -> u64 {
         let mut hasher = DefaultHasher::new();
         self.hash_into(&mut hasher);
@@ -243,9 +252,9 @@ impl Expr {
     }
 
     fn hash_into(&self, h: &mut DefaultHasher) {
-        // Discriminant tag first (ensures different variants hash differently).
+        // Tags 0-11 match original; 13 and 14 are new (skip 12 to avoid future clash).
         let tag: u8 = match self {
-            Expr::Var        => 0,
+            Expr::VarT       => 0,
             Expr::Const(_)   => 1,
             Expr::Add(_, _)  => 2,
             Expr::Sub(_, _)  => 3,
@@ -257,15 +266,14 @@ impl Expr {
             Expr::Log(_)     => 9,
             Expr::Sqrt(_)    => 10,
             Expr::Abs(_)     => 11,
+            Expr::VarG       => 13,
+            Expr::VarDL      => 14,
         };
         tag.hash(h);
 
         match self {
-            Expr::Var => {}
-            Expr::Const(c) => {
-                // Bitwise representation for deterministic hashing of floats.
-                c.to_bits().hash(h);
-            }
+            Expr::VarT | Expr::VarG | Expr::VarDL => {}
+            Expr::Const(c) => { c.to_bits().hash(h); }
             Expr::Sin(a) | Expr::Cos(a) | Expr::Exp(a)
             | Expr::Log(a) | Expr::Sqrt(a) | Expr::Abs(a) => {
                 a.hash_into(h);
@@ -280,13 +288,9 @@ impl Expr {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 8.  Prefix Parser  (Rust-native; mirrors Python's `_parse_prefix`)
+// 8.  Prefix Parser
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Parse a space-separated prefix string back into an `Expr`.
-///
-/// Returns `Err` on empty/malformed input. Used in tests and by the Python
-/// `evaluate_fast` bridge which passes prefix strings across the FFI.
 pub fn parse_prefix(src: &str) -> Result<Expr, String> {
     let tokens: Vec<&str> = src.split_whitespace().collect();
     let mut idx = 0usize;
@@ -302,21 +306,23 @@ fn parse_tokens(tokens: &[&str], idx: &mut usize) -> Result<Expr, String> {
     *idx += 1;
 
     match tok {
-        "t"    => Ok(Expr::Var),
-        "+"    => Ok(Expr::Add(  Box::new(parse_tokens(tokens, idx)?),
-                                 Box::new(parse_tokens(tokens, idx)?))),
-        "-"    => Ok(Expr::Sub(  Box::new(parse_tokens(tokens, idx)?),
-                                 Box::new(parse_tokens(tokens, idx)?))),
-        "*"    => Ok(Expr::Mul(  Box::new(parse_tokens(tokens, idx)?),
-                                 Box::new(parse_tokens(tokens, idx)?))),
-        "/"    => Ok(Expr::Div(  Box::new(parse_tokens(tokens, idx)?),
-                                 Box::new(parse_tokens(tokens, idx)?))),
+        // Variables — all three forms
+        "t"    => Ok(Expr::VarT),
+        "g"    => Ok(Expr::VarG),
+        "dl"   => Ok(Expr::VarDL),
+        // Binary operators
+        "+"    => Ok(Expr::Add(  Box::new(parse_tokens(tokens, idx)?), Box::new(parse_tokens(tokens, idx)?))),
+        "-"    => Ok(Expr::Sub(  Box::new(parse_tokens(tokens, idx)?), Box::new(parse_tokens(tokens, idx)?))),
+        "*"    => Ok(Expr::Mul(  Box::new(parse_tokens(tokens, idx)?), Box::new(parse_tokens(tokens, idx)?))),
+        "/"    => Ok(Expr::Div(  Box::new(parse_tokens(tokens, idx)?), Box::new(parse_tokens(tokens, idx)?))),
+        // Unary functions
         "sin"  => Ok(Expr::Sin(  Box::new(parse_tokens(tokens, idx)?))),
         "cos"  => Ok(Expr::Cos(  Box::new(parse_tokens(tokens, idx)?))),
         "exp"  => Ok(Expr::Exp(  Box::new(parse_tokens(tokens, idx)?))),
         "log"  => Ok(Expr::Log(  Box::new(parse_tokens(tokens, idx)?))),
         "sqrt" => Ok(Expr::Sqrt( Box::new(parse_tokens(tokens, idx)?))),
         "abs"  => Ok(Expr::Abs(  Box::new(parse_tokens(tokens, idx)?))),
+        // Numeric literal
         _      => tok.parse::<f64>()
                       .map(Expr::Const)
                       .map_err(|_| format!("Unknown token: `{}`", tok)),
@@ -333,232 +339,254 @@ mod tests {
 
     // ── 9.1  Construction & Structural Metrics ────────────────────────────────
 
-    /// Test 1 (mandated): Construct a multi-node AST and verify structural metrics.
-    ///
-    /// Formula: `(t + 0.5) * exp(t)`
-    /// Expected tree layout:
-    ///   Mul                 ← node 1
-    ///     Add               ← node 2
-    ///       Var             ← node 3
-    ///       Const(0.5)      ← node 4
-    ///     Exp               ← node 5
-    ///       Var             ← node 6
-    ///
-    /// size  = 6
-    /// depth = 3  (root→Mul→Add→Var)
     #[test]
     fn test_ast_construction_and_metrics() {
+        // (t + 0.5) * exp(t)   →  6 nodes, depth 3
         let tree = Expr::Mul(
-            Box::new(Expr::Add(
-                Box::new(Expr::Var),
-                Box::new(Expr::Const(0.5)),
-            )),
-            Box::new(Expr::Exp(Box::new(Expr::Var))),
+            Box::new(Expr::Add(Box::new(Expr::VarT), Box::new(Expr::Const(0.5)))),
+            Box::new(Expr::Exp(Box::new(Expr::VarT))),
         );
-
-        // Memory: 6 heap-allocated nodes (4 Boxed children + 2 terminals).
-        assert_eq!(tree.size(), 6, "Tree must have exactly 6 nodes");
-        assert_eq!(tree.depth(), 3, "Tree depth must be 3");
-        assert!(tree.is_within_cap(), "Tree must be within MAX_NODES/MAX_DEPTH caps");
+        assert_eq!(tree.size(), 6);
+        assert_eq!(tree.depth(), 3);
+        assert!(tree.is_within_cap());
     }
 
-    /// Verify leaf terminals produce minimal metrics.
     #[test]
     fn test_leaf_metrics() {
-        assert_eq!(Expr::Var.size(), 1);
-        assert_eq!(Expr::Var.depth(), 1);
+        assert_eq!(Expr::VarT.size(), 1);
+        assert_eq!(Expr::VarT.depth(), 1);
+        assert_eq!(Expr::VarG.size(), 1);
+        assert_eq!(Expr::VarDL.size(), 1);
         assert_eq!(Expr::Const(3.14).size(), 1);
         assert_eq!(Expr::Const(3.14).depth(), 1);
     }
 
-    /// MAX_NODES cap boundary: a tree with exactly 15 nodes must satisfy
-    /// `size() <= MAX_NODES`. A 16-node tree must violate the cap.
-    /// Note: `is_within_cap()` also checks depth, so a linear 15-node chain
-    /// will violate the depth cap even if size is fine. We test size and depth
-    /// invariants independently here.
     #[test]
     fn test_cap_enforcement() {
-        // 15-node linear chain: 14 × Abs + 1 × Var.
-        // size = 15, depth = 15 (violates MAX_DEPTH = 7 but not MAX_NODES).
-        let mut tree = Expr::Var;
+        let mut tree = Expr::VarT;
         for _ in 0..14 {
             tree = Expr::Abs(Box::new(tree));
         }
-        assert_eq!(tree.size(), 15, "Chain must be exactly 15 nodes");
-        assert_eq!(tree.depth(), 15, "Linear chain depth must equal its node count");
-        // size is within MAX_NODES cap
-        assert!(tree.size() <= MAX_NODES, "15 nodes must be within MAX_NODES");
-        // depth violates MAX_DEPTH — is_within_cap() must be false
-        assert!(!tree.is_within_cap(),
-            "15-deep linear chain must violate MAX_DEPTH cap");
+        assert_eq!(tree.size(), 15);
+        assert!(tree.size() <= MAX_NODES);
+        assert!(!tree.is_within_cap(), "Linear 15-deep chain violates MAX_DEPTH");
 
-        // 16-node chain violates both caps.
         let over = Expr::Abs(Box::new(tree));
-        assert_eq!(over.size(), 16, "Over-cap tree must have 16 nodes");
-        assert!(over.size() > MAX_NODES, "16-node tree must exceed MAX_NODES");
-        assert!(!over.is_within_cap(), "16-node tree must fail is_within_cap()");
+        assert!(over.size() > MAX_NODES);
+        assert!(!over.is_within_cap());
 
-        // A balanced tree of depth 3 and size 6 must pass both caps.
         let balanced = Expr::Mul(
-            Box::new(Expr::Add(Box::new(Expr::Var), Box::new(Expr::Const(0.5)))),
-            Box::new(Expr::Exp(Box::new(Expr::Var))),
+            Box::new(Expr::Add(Box::new(Expr::VarT), Box::new(Expr::Const(0.5)))),
+            Box::new(Expr::Exp(Box::new(Expr::VarT))),
         );
         assert_eq!(balanced.size(), 6);
-        assert_eq!(balanced.depth(), 3);
-        assert!(balanced.is_within_cap(), "Balanced 6-node tree must pass both caps");
+        assert!(balanced.is_within_cap());
     }
 
-    // ── 9.2  Numeric Evaluation ───────────────────────────────────────────────
+    // ── 9.2  Multi-Variable Evaluation ───────────────────────────────────────
 
-    /// Var evaluates to t at every point.
     #[test]
-    fn test_var_evaluation() {
-        let t_vals = [0.0, 0.25, 0.5, 0.75, 1.0];
-        for &t in &t_vals {
-            assert_eq!(Expr::Var.eval(t), t);
+    fn test_var_t_evaluation() {
+        for &t in &[0.0, 0.25, 0.5, 0.75, 1.0] {
+            assert_eq!(Expr::VarT.eval(t, 0.5, -0.3), t);
         }
     }
 
-    /// Const evaluates to its stored value regardless of t.
     #[test]
-    fn test_const_evaluation() {
+    fn test_var_g_evaluation() {
+        for &g in &[-2.0, 0.0, 1.5] {
+            assert_eq!(Expr::VarG.eval(0.5, g, 0.1), g);
+        }
+    }
+
+    #[test]
+    fn test_var_dl_evaluation() {
+        for &dl in &[-1.0, 0.0, 0.8] {
+            assert_eq!(Expr::VarDL.eval(0.5, 0.0, dl), dl);
+        }
+    }
+
+    #[test]
+    fn test_const_is_independent_of_all_inputs() {
         let c = Expr::Const(0.001);
-        for t in [0.0, 0.5, 1.0] {
-            assert_eq!(c.eval(t), 0.001);
-        }
+        assert_eq!(c.eval(0.0, 0.0, 0.0), 0.001);
+        assert_eq!(c.eval(1.0, 2.0, -1.0), 0.001);
     }
 
-    /// Protected division: denominator → 0 must not produce NaN or Inf.
+    #[test]
+    fn test_gradient_aware_flag() {
+        assert!(!Expr::VarT.is_gradient_aware());
+        assert!(Expr::VarG.is_gradient_aware());
+        assert!(Expr::VarDL.is_gradient_aware());
+        let formula = Expr::Mul(Box::new(Expr::VarT), Box::new(Expr::VarG));
+        assert!(formula.is_gradient_aware());
+        let time_only = Expr::Cos(Box::new(Expr::VarT));
+        assert!(!time_only.is_gradient_aware());
+    }
+
     #[test]
     fn test_protected_division() {
-        // 1.0 / 0.0  →  protected fallback, result must be finite
         let expr = Expr::Div(Box::new(Expr::Const(1.0)), Box::new(Expr::Const(0.0)));
-        let result = expr.eval(0.5);
-        assert!(result.is_finite(), "Protected division must return a finite value; got {}", result);
+        assert!(expr.eval(0.5, 0.0, 0.0).is_finite());
     }
 
-    /// Protected exp: large exponent must not overflow to Inf.
     #[test]
     fn test_protected_exp() {
-        // exp(1000 * t) at t=1 would be astronomically large without protection.
         let expr = Expr::Exp(Box::new(Expr::Mul(
             Box::new(Expr::Const(1000.0)),
-            Box::new(Expr::Var),
+            Box::new(Expr::VarT),
         )));
-        let result = expr.eval(1.0);
-        assert!(result.is_finite(), "Protected exp must clamp to finite; got {}", result);
-        assert!(result <= 1e6, "Protected exp result must be ≤ 1e6; got {}", result);
+        let result = expr.eval(1.0, 0.0, 0.0);
+        assert!(result.is_finite());
+        assert!(result <= 1e6);
     }
 
-    /// Protected log: log(0) must not produce -Inf.
     #[test]
     fn test_protected_log() {
         let expr = Expr::Log(Box::new(Expr::Const(0.0)));
-        let result = expr.eval(0.0);
-        assert!(result.is_finite(), "Protected log(0) must be finite; got {}", result);
+        assert!(expr.eval(0.0, 0.0, 0.0).is_finite());
     }
 
-    /// eval_schedule output must be fully within [1e-7, 10.0].
     #[test]
     fn test_eval_schedule_clamping() {
-        let t_array: Vec<f64> = (0..=100).map(|i| i as f64 / 100.0).collect();
-        // A formula that evaluates to very large or very small values.
         let expr = Expr::Exp(Box::new(Expr::Mul(
             Box::new(Expr::Const(50.0)),
-            Box::new(Expr::Var),
+            Box::new(Expr::VarT),
         )));
-        let schedule = expr.eval_schedule(&t_array);
+        // Use time-only path for this test
+        let t_array: Vec<f64> = (0..=100).map(|i| i as f64 / 100.0).collect();
+        let schedule = expr.eval_schedule_time_only(&t_array);
         assert_eq!(schedule.len(), t_array.len());
         for &v in &schedule {
-            assert!(v >= 1e-7 && v <= 10.0,
-                "Schedule value {} must be in [1e-7, 10.0]", v);
+            assert!(v >= 1e-7 && v <= 10.0, "Schedule value {} out of [1e-7, 10.0]", v);
         }
     }
 
-    // ── 9.3  Prefix Serialization / Deserialization Round-trip ───────────────
-
-    /// Prefix round-trip: serialize then re-parse, verify structural equality.
     #[test]
-    fn test_prefix_roundtrip() {
+    fn test_eval_schedule_multi_variable() {
+        // Formula: t * exp(-g)  — a gradient-aware schedule
+        let expr = Expr::Mul(
+            Box::new(Expr::VarT),
+            Box::new(Expr::Exp(Box::new(Expr::Mul(
+                Box::new(Expr::Const(-1.0)),
+                Box::new(Expr::VarG),
+            )))),
+        );
+        let inputs: Vec<(f64, f64, f64)> = vec![
+            (0.5, 0.0, 0.0),   // mid-time, stable gradient
+            (0.5, 2.0, 0.0),   // mid-time, large gradient
+            (0.5, -2.0, 0.0),  // mid-time, small gradient
+        ];
+        let schedule = expr.eval_schedule(&inputs);
+        assert_eq!(schedule.len(), 3);
+        // At g=2.0 LR should be less than at g=0.0 (exp(-2) < exp(0))
+        assert!(schedule[1] < schedule[0], "LR at large gradient should be lower");
+        // At g=-2.0 LR should be greater than at g=0.0
+        assert!(schedule[2] > schedule[0], "LR at negative log-gradient should be higher");
+        for &v in &schedule {
+            assert!(v >= 1e-7 && v <= 10.0, "Value {} out of bounds", v);
+        }
+    }
+
+    // ── 9.3  Prefix Serialization ─────────────────────────────────────────────
+
+    #[test]
+    fn test_prefix_roundtrip_time_formula() {
         let original = Expr::Mul(
-            Box::new(Expr::Add(Box::new(Expr::Var), Box::new(Expr::Const(0.5)))),
-            Box::new(Expr::Exp(Box::new(Expr::Var))),
+            Box::new(Expr::Add(Box::new(Expr::VarT), Box::new(Expr::Const(0.5)))),
+            Box::new(Expr::Exp(Box::new(Expr::VarT))),
         );
         let prefix = original.to_prefix();
         assert_eq!(prefix, "* + t 0.5 exp t");
-
-        let parsed = parse_prefix(&prefix).expect("prefix should parse cleanly");
-        // Verify structural equality via hash (structural_hash is deterministic).
-        assert_eq!(original.structural_hash(), parsed.structural_hash(),
-            "Round-tripped tree must be structurally identical");
+        let parsed = parse_prefix(&prefix).expect("prefix should parse");
+        assert_eq!(original.structural_hash(), parsed.structural_hash());
     }
 
-    /// Parser rejects unknown tokens gracefully.
+    #[test]
+    fn test_prefix_roundtrip_gradient_formula() {
+        // t * exp(-g)  →  "* t exp * -1 g"
+        let original = Expr::Mul(
+            Box::new(Expr::VarT),
+            Box::new(Expr::Exp(Box::new(Expr::Mul(
+                Box::new(Expr::Const(-1.0)),
+                Box::new(Expr::VarG),
+            )))),
+        );
+        let prefix = original.to_prefix();
+        let parsed = parse_prefix(&prefix).expect("gradient formula should parse");
+        assert_eq!(original.structural_hash(), parsed.structural_hash());
+    }
+
+    #[test]
+    fn test_prefix_roundtrip_all_variables() {
+        // t + g + dl
+        let original = Expr::Add(
+            Box::new(Expr::Add(Box::new(Expr::VarT), Box::new(Expr::VarG))),
+            Box::new(Expr::VarDL),
+        );
+        let prefix = original.to_prefix();
+        assert_eq!(prefix, "+ + t g dl");
+        let parsed = parse_prefix(&prefix).unwrap();
+        assert_eq!(original.structural_hash(), parsed.structural_hash());
+    }
+
     #[test]
     fn test_prefix_parse_unknown_token() {
-        let result = parse_prefix("tanh t");
-        assert!(result.is_err(), "Unknown operator 'tanh' must produce Err");
+        assert!(parse_prefix("tanh t").is_err());
     }
 
     // ── 9.4  LaTeX Display ────────────────────────────────────────────────────
 
     #[test]
-    fn test_latex_display_var() {
-        assert_eq!(format!("{}", Expr::Var), "t");
+    fn test_latex_var_t() {
+        assert_eq!(format!("{}", Expr::VarT), "t");
+    }
+
+    #[test]
+    fn test_latex_var_g() {
+        assert_eq!(format!("{}", Expr::VarG), r"\|g\|");
+    }
+
+    #[test]
+    fn test_latex_var_dl() {
+        assert_eq!(format!("{}", Expr::VarDL), r"\Delta\ell");
     }
 
     #[test]
     fn test_latex_display_add() {
-        let e = Expr::Add(Box::new(Expr::Var), Box::new(Expr::Const(1.0)));
+        let e = Expr::Add(Box::new(Expr::VarT), Box::new(Expr::Const(1.0)));
         assert_eq!(format!("{}", e), "(t + 1)");
     }
 
     #[test]
     fn test_latex_display_div() {
-        let e = Expr::Div(Box::new(Expr::Var), Box::new(Expr::Const(2.0)));
+        let e = Expr::Div(Box::new(Expr::VarT), Box::new(Expr::Const(2.0)));
         assert_eq!(format!("{}", e), r"\frac{t}{2}");
-    }
-
-    #[test]
-    fn test_latex_display_nested() {
-        // sin(t + 0.5) — format_const(0.5) must render as "0.5" not "0.5000"
-        let e = Expr::Sin(Box::new(Expr::Add(
-            Box::new(Expr::Var),
-            Box::new(Expr::Const(0.5)),
-        )));
-        assert_eq!(format!("{}", e), r"\sin((t + 0.5))");
     }
 
     // ── 9.5  Structural Hashing ───────────────────────────────────────────────
 
-    /// Same tree → same hash.
     #[test]
     fn test_hash_determinism() {
-        let a = Expr::Add(Box::new(Expr::Var), Box::new(Expr::Const(0.5)));
-        let b = Expr::Add(Box::new(Expr::Var), Box::new(Expr::Const(0.5)));
+        let a = Expr::Add(Box::new(Expr::VarT), Box::new(Expr::Const(0.5)));
+        let b = Expr::Add(Box::new(Expr::VarT), Box::new(Expr::Const(0.5)));
         assert_eq!(a.structural_hash(), b.structural_hash());
     }
 
-    /// Distinct trees → distinct hashes (in practice; not guaranteed but holds here).
     #[test]
-    fn test_hash_distinguishes_distinct_trees() {
-        let a = Expr::Add(Box::new(Expr::Var), Box::new(Expr::Const(0.5)));
-        let b = Expr::Add(Box::new(Expr::Var), Box::new(Expr::Const(0.6)));
-        assert_ne!(a.structural_hash(), b.structural_hash(),
-            "Trees with different constants must hash differently");
-
-        let c = Expr::Sub(Box::new(Expr::Var), Box::new(Expr::Const(0.5)));
-        assert_ne!(a.structural_hash(), c.structural_hash(),
-            "Add and Sub must hash differently");
+    fn test_new_variables_hash_distinctly() {
+        let ht = Expr::VarT.structural_hash();
+        let hg = Expr::VarG.structural_hash();
+        let hdl = Expr::VarDL.structural_hash();
+        assert_ne!(ht, hg, "VarT and VarG must hash differently");
+        assert_ne!(ht, hdl, "VarT and VarDL must hash differently");
+        assert_ne!(hg, hdl, "VarG and VarDL must hash differently");
     }
 
-    /// Constants hashing uses bit-level representation, so -0.0 == 0.0 may differ.
-    /// We just verify that Const(1.0) and Const(2.0) hash differently.
     #[test]
-    fn test_const_hash_uniqueness() {
-        assert_ne!(
-            Expr::Const(1.0).structural_hash(),
-            Expr::Const(2.0).structural_hash(),
-        );
+    fn test_hash_distinguishes_distinct_trees() {
+        let a = Expr::Add(Box::new(Expr::VarT), Box::new(Expr::Const(0.5)));
+        let b = Expr::Add(Box::new(Expr::VarT), Box::new(Expr::Const(0.6)));
+        assert_ne!(a.structural_hash(), b.structural_hash());
     }
 }

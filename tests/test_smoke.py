@@ -15,8 +15,7 @@ import pytest
 RUST_AVAILABLE = importlib.util.find_spec("symbolr_rust") is not None
 
 
-# ── Import sanity ─────────────────────────────────────────────────────────────
-
+# Import sanity
 def test_core_imports():
     """All restructured modules must be importable without error."""
     from src.symbolr.core.evaluator import BaseEvaluator
@@ -29,8 +28,7 @@ def test_core_imports():
     from src.symbolr.evaluators.synthetic import SyntheticEvaluator
 
 
-# ── Config alignment ──────────────────────────────────────────────────────────
-
+# Config alignment
 def test_config_matches_rust_defaults():
     """Python config defaults must match rust_core compiled constants."""
     from src.symbolr.config import SymboLRConfig
@@ -54,8 +52,7 @@ def test_config_from_yaml(tmp_path):
     assert cfg.crossover_rate == pytest.approx(0.20)  # default unchanged
 
 
-# ── Prefix parser ─────────────────────────────────────────────────────────────
-
+# Prefix parser
 def test_prefix_parser_constant():
     from src.symbolr.artifacts.prefix_parser import evaluate_formula
     assert evaluate_formula("0.01", t=0.5) == pytest.approx(0.01)
@@ -88,8 +85,7 @@ def test_prefix_parser_clamps_output():
     assert evaluate_formula("-999.0") == pytest.approx(1e-7)     # clamped to LR_MIN
 
 
-# ── Exporters ─────────────────────────────────────────────────────────────────
-
+# Exporters
 def test_pytorch_export_produces_code():
     from src.symbolr.artifacts.pytorch_export import export_to_pytorch
     code = export_to_pytorch("cos * 3.14159 t")
@@ -112,8 +108,7 @@ def test_exporters_handle_empty_input():
     assert "$$" in export_to_latex("")
 
 
-# ── Baseline schedules ────────────────────────────────────────────────────────
-
+# Baseline schedules
 def test_all_baselines_produce_valid_output():
     from src.symbolr.baselines.schedules import BASELINE_SCHEDULES
     t = np.linspace(0, 1, 100)
@@ -129,8 +124,7 @@ def test_baseline_count():
     assert len(BASELINE_SCHEDULES) == 7
 
 
-# ── GenerationResult parsing ──────────────────────────────────────────────────
-
+# GenerationResult parsing
 def test_generation_result_parses_json():
     from src.symbolr.core.bridge import GenerationResult
     payload = {
@@ -166,8 +160,7 @@ def test_generation_result_handles_null_mse():
     assert r.best_mse == float("inf")
 
 
-# ── Rust-dependent tests ──────────────────────────────────────────────────────
-
+# Rust-dependent tests
 @pytest.mark.skipif(not RUST_AVAILABLE, reason="symbolr_rust not compiled — run `maturin develop`")
 def test_synthetic_evaluator_is_deterministic():
     """SyntheticEvaluator must return identical results for identical formulas."""

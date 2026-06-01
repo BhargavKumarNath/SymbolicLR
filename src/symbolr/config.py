@@ -12,8 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 
-# ── Runtime detection ─────────────────────────────────────────────────────────
-
+# Runtime detection
 def _detect_torch() -> bool:
     try:
         import torch  # noqa: F401
@@ -38,8 +37,7 @@ def _detect_rust() -> bool:
         return False
 
 
-# ── Config dataclass ──────────────────────────────────────────────────────────
-
+# Config dataclass
 @dataclass
 class SymboLRConfig:
     """
@@ -53,32 +51,37 @@ class SymboLRConfig:
     cuda_available:  bool = field(default_factory=_detect_cuda)
     rust_available:  bool = field(default_factory=_detect_rust)
 
-    # ── Evolution — must match rust_core/src/evolution.rs ────────────────────
+    # Evolution — must match rust_core/src/evolution.rs
     max_generations: int   = 50
     pop_size:        int   = 50
     seed:            int   = 42
     crossover_rate:  float = 0.20  # evolution.rs default
     mutation_rate:   float = 0.70  # evolution.rs default
 
-    # ── MAP-Elites archive — must match rust_core/src/archive.rs ─────────────
+    # MAP-Elites archive — must match rust_core/src/archive.rs
     size_bins:       int = 30   # archive.rs default
     com_bins:        int = 20   # archive.rs default
     smoothness_bins: int = 10   # archive.rs default
 
-    # ── Evaluator ─────────────────────────────────────────────────────────────
+    # Evaluator
     evaluator:   str = "synthetic"  # "synthetic" | "cuda_batch" | "gradient_aware"
     time_steps:  int = 100
 
-    # ── Synthetic evaluator parameters ────────────────────────────────────────
+    # Synthetic evaluator parameters
     synth_n_dims:        int   = 5
     synth_n_evaluations: int   = 3
     synth_noise_scale:   float = 0.02
     synth_initial_loss:  float = 2.3
 
-    # ── Logging ───────────────────────────────────────────────────────────────
-    log_dir: str = "research_journal/experiments"
+    # Gradient-aware evaluator (Phase 3)
+    grad_eval_n_steps:          int   = 200   # training steps per formula
+    grad_eval_batch_size:       int   = 128   # mini-batch size for proxy task
+    grad_eval_base_lr:          float = 0.1   # LR during warmup window
+    grad_eval_warmup_fraction:  float = 0.10  # fraction of steps for warmup
+    grad_eval_halving_fraction: float = 0.50  # fraction of remaining steps for Phase 1
 
-    # ── Properties ────────────────────────────────────────────────────────────
+    # Logging
+    log_dir: str = "research_journal/experiments"
 
     @property
     def device(self) -> Any:
@@ -91,8 +94,7 @@ class SymboLRConfig:
     def is_gpu(self) -> bool:
         return self.cuda_available
 
-    # ── Serialization ─────────────────────────────────────────────────────────
-
+    # Serialization
     def to_dict(self) -> dict:
         """Return a plain dict of config values (excludes runtime detection fields)."""
         return {
@@ -106,6 +108,11 @@ class SymboLRConfig:
             "smoothness_bins": self.smoothness_bins,
             "evaluator":       self.evaluator,
             "time_steps":      self.time_steps,
+            "grad_eval_n_steps":          self.grad_eval_n_steps,
+            "grad_eval_batch_size":       self.grad_eval_batch_size,
+            "grad_eval_base_lr":          self.grad_eval_base_lr,
+            "grad_eval_warmup_fraction":  self.grad_eval_warmup_fraction,
+            "grad_eval_halving_fraction": self.grad_eval_halving_fraction,
         }
 
     @classmethod
@@ -125,8 +132,7 @@ class SymboLRConfig:
                 setattr(self, k, v)
 
 
-# ── Singleton ─────────────────────────────────────────────────────────────────
-
+# Singleton
 _config: Optional[SymboLRConfig] = None
 
 

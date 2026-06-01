@@ -186,19 +186,24 @@ impl EvolutionEngine {
             0, // gen_time_ms will be handled by python side now
         );
 
+        // Compute gradient-sensitivity telemetry before moving state back
+        let grad_sensitivity = state.archive.mean_gradient_sensitivity();
+
         // Restore state
         self.state = Some(state);
         self.current_generation = gen;
 
         let json = serde_json::json!({
-            "generation_number": stats.generation,
-            "best_mse":          finite_f64(stats.best_loss),
-            "average_mse":       finite_f64(stats.mean_loss),
-            "top_formula_latex": stats.best_formula_latex,
-            "top_formula_prefix": stats.best_formula_prefix,
-            "archive_size":      stats.archive_size,
-            "new_entries":       stats.new_entries,
-            "gen_time_ms":       stats.gen_time_ms,
+            "generation_number":        stats.generation,
+            "best_mse":                 finite_f64(stats.best_loss),
+            "average_mse":              finite_f64(stats.mean_loss),
+            "top_formula_latex":        stats.best_formula_latex,
+            "top_formula_prefix":       stats.best_formula_prefix,
+            "archive_size":             stats.archive_size,
+            "new_entries":              stats.new_entries,
+            "gen_time_ms":              stats.gen_time_ms,
+            // Phase 2: gradient awareness telemetry
+            "gradient_sensitivity_mean": finite_f64(grad_sensitivity),
         });
 
         Ok(json.to_string())
@@ -208,14 +213,15 @@ impl EvolutionEngine {
         let state = self.state.as_ref().unwrap();
         let s = state.archive.stats();
         serde_json::json!({
-            "occupied_niches": s.occupied_niches,
-            "max_niches":      s.max_niches,
-            "occupancy_pct":   finite_f64(s.occupancy_pct),
-            "total_attempts":  s.total_attempts,
-            "total_additions": s.total_additions,
-            "best_loss":       finite_f64(s.best_loss),
-            "median_loss":     finite_f64(s.median_loss),
-            "mean_elite_age":  finite_f64(s.mean_elite_age),
+            "occupied_niches":            s.occupied_niches,
+            "max_niches":                 s.max_niches,
+            "occupancy_pct":              finite_f64(s.occupancy_pct),
+            "total_attempts":             s.total_attempts,
+            "total_additions":            s.total_additions,
+            "best_loss":                  finite_f64(s.best_loss),
+            "median_loss":                finite_f64(s.median_loss),
+            "mean_elite_age":             finite_f64(s.mean_elite_age),
+            "gradient_sensitivity_mean":  finite_f64(s.gradient_sensitivity_mean),
         })
         .to_string()
     }
@@ -287,18 +293,22 @@ impl EvolutionEngine {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn compute_single(prefix_expr: &str, t_view: &[f64]) -> Result<Vec<f64>, String> {
-    if let Some(cached) = CACHE.get(prefix_expr) {
+    // Cache key includes t_array length to prevent cross-call contamination
+    // when the same formula is evaluated with different time-step counts.
+    let cache_key = format!("{}|{}", prefix_expr, t_view.len());
+    if let Some(cached) = CACHE.get(&cache_key) {
         return Ok(cached.clone());
     }
     let ast: Expr = parse_prefix(prefix_expr)
         .map_err(|e| format!("parse_prefix error: {e}"))?;
     let mut result = Vec::with_capacity(t_view.len());
     for &t_val in t_view.iter() {
-        let mut val = ast.eval(t_val);
+        // Legacy path: g=0.0, dl=0.0 — backward compatible with SyntheticEvaluator
+        let mut val = ast.eval(t_val, 0.0, 0.0);
         if !val.is_finite() { val = 1.0; }
         result.push(val);
     }
-    CACHE.insert(prefix_expr.to_string(), result.clone());
+    CACHE.insert(cache_key, result.clone());
     Ok(result)
 }
 
