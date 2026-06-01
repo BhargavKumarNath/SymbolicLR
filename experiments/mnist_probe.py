@@ -8,7 +8,6 @@ import torchvision
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
-
 from src.symbolr.core.evaluator import BaseEvaluator
 from src.symbolr.core.bridge import RustEvolutionBridge
 from src.symbolr.artifacts.pytorch_export import export_to_pytorch
@@ -70,10 +69,7 @@ def prefix_to_infix(prefix_str: str) -> str:
                 
     return stack[0] if len(stack) == 1 else prefix_str
 
-# -----------------------------------------------------------------------------------
 # Manual Training 
-# -----------------------------------------------------------------------------------
-
 def train_manual_baselines(trainloader, valloader, epochs=5):
     print("\n=== Training Baseline Neural Networks (Fixed LR=1e-3) ===")
     results = {}
@@ -129,10 +125,7 @@ def train_manual_baselines(trainloader, valloader, epochs=5):
     return results
 
 
-# -----------------------------------------------------------------------------------
 # SymboLR Training
-# -----------------------------------------------------------------------------------
-
 class FastProxyEvaluator(BaseEvaluator):
     """A proxy evaluator for GP that trains fairly fast (1 epoch, 10k samples) to get a stable signal"""
     def __init__(self, epochs=20):

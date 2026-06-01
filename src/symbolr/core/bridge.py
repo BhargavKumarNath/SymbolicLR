@@ -38,18 +38,20 @@ class GenerationResult:
     never needs to understand Rust internals.
     """
 
-    generation_number: int
-    best_mse:          float
-    average_mse:       float
-    top_formula_latex: str
-    top_formula_prefix: str
-    archive_size:      int
-    new_entries:       int
-    gen_time_ms:       int
+    generation_number:         int
+    best_mse:                  float
+    average_mse:               float
+    top_formula_latex:         str
+    top_formula_prefix:        str
+    archive_size:              int
+    new_entries:               int
+    gen_time_ms:               int
+    gradient_sensitivity_mean: float = 0.0  # mean grad-sensitivity bin index [0,1]
 
     @classmethod
     def from_json(cls, json_str: str) -> "GenerationResult":
         data: dict = json.loads(json_str)
+        gsm = data.get("gradient_sensitivity_mean")
         return cls(
             generation_number=int(data.get("generation_number", 0)),
             best_mse=float(data["best_mse"]) if data.get("best_mse") is not None else float("inf"),
@@ -59,18 +61,20 @@ class GenerationResult:
             archive_size=int(data.get("archive_size", 0)),
             new_entries=int(data.get("new_entries", 0)),
             gen_time_ms=int(data.get("gen_time_ms", 0)),
+            gradient_sensitivity_mean=float(gsm) if gsm is not None else 0.0,
         )
 
     def to_dict(self) -> dict:
         return {
-            "generation_number": self.generation_number,
-            "best_mse":          self.best_mse,
-            "average_mse":       self.average_mse,
-            "top_formula_latex": self.top_formula_latex,
-            "top_formula_prefix": self.top_formula_prefix,
-            "archive_size":      self.archive_size,
-            "new_entries":       self.new_entries,
-            "gen_time_ms":       self.gen_time_ms,
+            "generation_number":         self.generation_number,
+            "best_mse":                  self.best_mse,
+            "average_mse":               self.average_mse,
+            "top_formula_latex":         self.top_formula_latex,
+            "top_formula_prefix":        self.top_formula_prefix,
+            "archive_size":              self.archive_size,
+            "new_entries":               self.new_entries,
+            "gen_time_ms":               self.gen_time_ms,
+            "gradient_sensitivity_mean": self.gradient_sensitivity_mean,
         }
 
 

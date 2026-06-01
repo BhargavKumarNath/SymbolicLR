@@ -6,7 +6,6 @@ of learning rates. All schedules are evaluated in the same harness as discovered
 formulas — no hardcoded comparison values anywhere.
 """
 from __future__ import annotations
-
 import numpy as np
 from typing import Dict, Callable
 

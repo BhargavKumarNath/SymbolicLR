@@ -39,39 +39,65 @@ def main_callback(ctx: typer.Context):
 
 @app.command(name="evolve", help="[bold green]Run the Rust-powered Streaming Evolution[/bold green]")
 def evolve(
-    generations: int = typer.Option(50, "--generations", "-g", help="Number of generations"),
-    pop_size:    int = typer.Option(50, "--pop-size",    "-p", help="Population size"),
-    time_steps:  int = typer.Option(100, "--time-steps", "-t", help="Surrogate time steps"),
-    seed:        int = typer.Option(42,  "--seed",       "-s", help="Random seed"),
-    evaluator:   str = typer.Option("cuda_batch", "--evaluator", "-e",
-                                    help="Evaluator: cuda_batch | synthetic"),
+    generations: int = typer.Option(50,  "--generations", "-g", help="Number of generations"),
+    pop_size:    int = typer.Option(50,  "--pop-size",    "-p", help="Population size"),
+    time_steps:  int = typer.Option(100, "--time-steps",  "-t",
+                                    help="Steps per schedule (synthetic) or training steps (gradient_aware)"),
+    seed:        int = typer.Option(42,  "--seed",        "-s", help="Random seed"),
+    evaluator:   str = typer.Option("synthetic", "--evaluator", "-e",
+                                    help="Evaluator: synthetic | gradient_aware | cuda_batch"),
+    checkpoint:  str = typer.Option("", "--checkpoint",   "-c", help="Save archive to file on completion"),
 ):
+    """
+    Run gradient-health-aware symbolic schedule discovery.
+
+    Use [bold]--evaluator gradient_aware[/bold] to evaluate formulas by training real models
+    and feeding live gradient norms and loss slopes to gradient-aware formulas.
+    This is the scientifically correct mode — gradient-reactive formulas can only
+    gain a fitness advantage when evaluated with real (g, dl) signals.
+
+    Use [bold]--evaluator synthetic[/bold] for fast CPU iteration (g=0, dl=0; time-only schedules).
+    """
     console.rule("[bold cyan]SymboLR: Streaming Evolution[/bold cyan]")
 
-    if evaluator == "cuda_batch":
-        data_path = os.path.join("data", "surrogate_labels.npy")
-        os.makedirs("data", exist_ok=True)
-
-        if not os.path.exists(data_path):
-            console.print(f"[dim]Generating seeded surrogate dataset at {data_path}...[/dim]")
-            rng = np.random.RandomState(seed)
-            probe_labels = rng.rand(time_steps).astype(np.float64)
-            np.save(data_path, probe_labels)
-
-        console.print(f"[dim]Loading surrogate dataset from {data_path}...[/dim]")
-        probe_labels = np.load(data_path, mmap_mode='r')
-        if not probe_labels.flags['C_CONTIGUOUS']:
-            probe_labels = np.ascontiguousarray(probe_labels)
-
-        from src.symbolr.torch_impl.evaluator import CUDABatchEvaluator
-        eval_instance = CUDABatchEvaluator(data_labels=probe_labels)
+    if evaluator == "gradient_aware":
+        from src.symbolr.evaluators.gradient_aware import GradientAwareEvaluator
+        eval_instance = GradientAwareEvaluator(n_steps=time_steps, seed=seed)
+        console.print(
+            f"[bold green]Evaluator[/bold green]: GradientAwareEvaluator  "
+            f"device={eval_instance._device}  n_steps={time_steps}"
+        )
+        console.print(
+            "[dim]Gradient-reactive formulas (e.g. 0.01*exp(-g)) will gain "
+            "real fitness advantage when gradients spike.[/dim]\n"
+        )
 
     elif evaluator == "synthetic":
         from src.symbolr.evaluators.synthetic import SyntheticEvaluator
         eval_instance = SyntheticEvaluator(time_steps=time_steps)
+        console.print(
+            f"[bold yellow]Evaluator[/bold yellow]: SyntheticEvaluator  "
+            f"time_steps={time_steps}  [dim](g=0, dl=0 — time-only schedules)[/dim]\n"
+        )
+
+    elif evaluator == "cuda_batch":
+        data_path = os.path.join("data", "surrogate_labels.npy")
+        os.makedirs("data", exist_ok=True)
+        if not os.path.exists(data_path):
+            rng = np.random.RandomState(seed)
+            np.save(data_path, rng.rand(time_steps).astype(np.float64))
+        probe_labels = np.load(data_path, mmap_mode='r')
+        if not probe_labels.flags['C_CONTIGUOUS']:
+            probe_labels = np.ascontiguousarray(probe_labels)
+        from src.symbolr.torch_impl.evaluator import CUDABatchEvaluator
+        eval_instance = CUDABatchEvaluator(data_labels=probe_labels)
+        console.print(f"[bold blue]Evaluator[/bold blue]: CUDABatchEvaluator\n")
 
     else:
-        console.print(f"[bold red]Unknown evaluator:[/bold red] {evaluator}")
+        console.print(
+            f"[bold red]Unknown evaluator:[/bold red] {evaluator!r}  "
+            f"(choose: synthetic | gradient_aware | cuda_batch)"
+        )
         raise typer.Exit(1)
 
     bridge = RustEvolutionBridge(
@@ -81,29 +107,43 @@ def evolve(
         seed=seed,
     )
 
+    show_sensitivity = evaluator == "gradient_aware"
+
     table = Table(show_lines=True, title="Evolution Telemetry")
-    table.add_column("Gen",       justify="right",  style="cyan")
-    table.add_column("Best MSE",  justify="right",  style="green")
-    table.add_column("Avg MSE",   justify="right",  style="yellow")
-    table.add_column("Archive",   justify="right",  style="blue")
-    table.add_column("Time (ms)", justify="right",  style="dim")
-    table.add_column("Top Formula", justify="left", style="magenta")
+    table.add_column("Gen",       justify="right", style="cyan")
+    table.add_column("Best",      justify="right", style="green")
+    table.add_column("Avg",       justify="right", style="yellow")
+    table.add_column("Archive",   justify="right", style="blue")
+    if show_sensitivity:
+        table.add_column("∇-Sens",  justify="right", style="magenta")
+    table.add_column("ms",        justify="right", style="dim")
+    table.add_column("Top Formula", justify="left", style="magenta", max_width=50)
 
     try:
         with Live(table, console=console, refresh_per_second=10):
             for result in bridge.stream():
-                table.add_row(
+                row = [
                     str(result.generation_number),
-                    f"{result.best_mse:.6f}",
-                    f"{result.average_mse:.6f}",
+                    f"{result.best_mse:.5f}",
+                    f"{result.average_mse:.5f}",
                     str(result.archive_size),
-                    str(result.gen_time_ms),
-                    result.top_formula_latex,
-                )
+                ]
+                if show_sensitivity:
+                    row.append(f"{result.gradient_sensitivity_mean:.3f}")
+                row += [str(result.gen_time_ms), result.top_formula_latex]
+                table.add_row(*row)
     except KeyboardInterrupt:
-        console.print("\n[bold red]Evolution interrupted.[/bold red]")
+        console.print("\n[bold yellow]Evolution interrupted.[/bold yellow]")
     except Exception as e:
         console.print(f"\n[bold red]Error:[/bold red] {e}")
+        raise typer.Exit(1)
+
+    if checkpoint:
+        try:
+            bridge.save_checkpoint(checkpoint)
+            console.print(f"[dim]Archive saved to {checkpoint}[/dim]")
+        except Exception as e:
+            console.print(f"[bold red]Checkpoint save failed:[/bold red] {e}")
 
 
 @app.command(name="dashboard", help="[bold blue]Launch the React Telemetry Dashboard[/bold blue]")
